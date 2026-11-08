@@ -22,6 +22,21 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": ["expo-sqlite", "expo-router", "expo-font"]
+    "plugins": [
+      "expo-sqlite",
+      "expo-router",
+      "expo-font"
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "0241bf79-2284-49bb-8bdf-ed11a6c69529"
+      }
+    },
+    "owner": "harnoorsingh1906"
   }
 }

@@ -2,6 +2,14 @@
 
 The API runs on the VPS, independently of the development computer. Once deployed over HTTPS, the mobile app works over home Wi-Fi and mobile data. Downloaded chapter text remains available offline.
 
+## Current deployment
+
+The separate **NovelReader** project / **production** environment hosts **NovelReader API** on the existing OVH server. Its temporary endpoint is:
+
+`https://h7jidcpjrctx5ibjdxxahk71.51.38.51.147.sslip.io`
+
+HTTPS, HTTP redirects, token protection, and the `/data` persistent volume are configured. The first deployment passed its Docker health check. The mobile build uses this generated endpoint; `novelsapi.brewwithcrew.com` remains the intended later custom domain. No additional hosting service or paid Expo plan was enabled. The existing VPS continues under its existing OVH billing arrangement.
+
 ## Application
 
 1. Point a DNS **A record** for `novelsapi.brewwithcrew.com` to the OVH VPS public IPv4 address. Add an AAAA record only if IPv6 routing is configured. Allow inbound 80/443 to the Coolify proxy.
@@ -41,6 +49,8 @@ EXPO_PUBLIC_API_TOKEN=THE_SAME_TOKEN_AS_THE_API
 ```
 
 Restart Expo after changing these values. Standalone builds embed these values, so rebuild the APK after changing them. This shared token supports a personal/trusted-client deployment and is extractable from the client; it does not provide individual user accounts.
+
+The root `.easignore` includes only the mobile `.env` for the build upload, because Expo must inline its public URL/token during bundling. Backend environments, database files, tools, and temporary artifacts are excluded. Do not put unrelated secrets in the mobile `.env`.
 
 From `apps/mobile`, sign in with `npx eas-cli@latest login`, link the project with `npx eas-cli@latest init`, and run `npx eas-cli@latest build --platform android --profile preview`. Install the resulting APK on the paired phone.
 
