@@ -1,5 +1,15 @@
 # Verification — 8 November 2026
 
+## OVH / Coolify deployment
+
+- Created a separate NovelReader project, production environment, and API resource on the existing VPS.
+- Docker deployment passed its health check; generated sslip.io domain has valid HTTPS and redirects HTTP to HTTPS.
+- `/health` returned 200; unauthenticated `/stats` returned 401; authenticated catalogue requests returned 200.
+- The VPS independently completed Renegade Immortal's 2,093-entry chapter index. Selecting Chapter 1 fetched and cached 100 text paragraphs while the remaining index was still running.
+- Remote discovery returned ten unique Top 10 entries and twelve Reddit discussion picks.
+- Configured a named volume mounted at `/data`; database backup/restore has not yet been exercised.
+- Expo account was verified on the Free plan with 0/15 Android builds used before starting the APK build. No plan upgrade or new hosting subscription was selected.
+
 ## Live source checks
 
 - Completed FreeWebNovel.net's exposed 320-page catalogue crawl; local database contains **7,030** novel records from that source.
