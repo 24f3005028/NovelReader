@@ -22,6 +22,13 @@ import { RedditSync } from './reddit.js';
 
 export function createApp(store: Store) {
   const app = express();
+  // Enable only behind a proxy that is the sole public route into the container.
+  if (process.env.TRUST_PROXY_HOPS) {
+    const hops = Number(process.env.TRUST_PROXY_HOPS);
+    if (!Number.isInteger(hops) || hops < 1 || hops > 10)
+      throw new Error('TRUST_PROXY_HOPS must be an integer between 1 and 10');
+    app.set('trust proxy', hops);
+  }
   const community = new Community(store),
     reddit = new RedditSync(store);
   app.locals.reddit = reddit;
@@ -36,8 +43,8 @@ export function createApp(store: Store) {
     }),
     express.json({ limit: '512kb' }),
   );
-  app.use(rateLimit({ windowMs: 60000, limit: 240 }));
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  app.use(rateLimit({ windowMs: 60000, limit: 240 }));
   app.use((req, res, next) => {
     const token = process.env.API_TOKEN;
     if (!token) return next();

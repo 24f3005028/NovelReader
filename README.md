@@ -80,6 +80,8 @@ scripts/           Branding asset preparation
 
 ## Deploy the API
 
+For the OVH VPS deployment, follow [Coolify setup](docs/coolify.md). The intended mobile endpoint is `https://novelsapi.brewwithcrew.com`.
+
 ```sh
 docker compose up --build -d
 ```
