@@ -1,0 +1,28 @@
+{
+  "name": "novelreader",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,expo -c green,cyan \"npm run dev -w @novelreader/api\" \"npm start -w @novelreader/mobile\"",
+    "api": "npm run dev -w @novelreader/api",
+    "mobile": "npm run start -w @novelreader/mobile --",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test -w @novelreader/api",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "lint": "npm exec -w @novelreader/mobile -- eslint .",
+    "format": "prettier --write apps packages README.md"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "prettier": "^3.9.10",
+    "sharp": "^0.35.5",
+    "typescript": "~5.9.2"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

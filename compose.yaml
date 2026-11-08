@@ -1,0 +1,12 @@
+services:
+  api:
+    build: .
+    ports: ['4000:4000']
+    environment:
+      ENABLED_SOURCES: ${ENABLED_SOURCES:-demo,freewebnovel-net,readnovelfull}
+      API_TOKEN: ${API_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081}
+    volumes: ['novelreader-data:/data']
+    restart: unless-stopped
+volumes:
+  novelreader-data:

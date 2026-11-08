@@ -1,0 +1,8 @@
+node_modules
+.git
+**/.env
+**/node_modules
+**/data
+**/dist
+tmp
+.tools

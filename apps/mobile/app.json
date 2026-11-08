@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "NovelReader",
+    "slug": "novelreader",
+    "scheme": "novelreader",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.novelreader.app"
+    },
+    "android": {
+      "package": "com.novelreader.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#05070B",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": ["expo-sqlite", "expo-router", "expo-font"]
+  }
+}
