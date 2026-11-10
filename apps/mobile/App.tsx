@@ -41,6 +41,7 @@ import { fetchChapterOnDemand } from './src/chapter-service';
 import { DiscoveryShelves, RatingPanel, DiscussionPanel } from './src/components/Community';
 import { ChapterPicker, DownloadRange } from './src/components/ChapterTools';
 import { NovelAction, NovelHeader } from './src/components/NovelHeader';
+import { Characters } from './src/components/Characters';
 import {
   defaults,
   localChapter,
@@ -154,7 +155,9 @@ function Main() {
   const [readingPercent, setReadingPercent] = useState(0);
   const [retryChapter, setRetryChapter] = useState<Chapter | null>(null);
   const [chapterQuery, setChapterQuery] = useState('');
-  const [detailTab, setDetailTab] = useState<'Chapters' | 'About' | 'Community'>('Chapters');
+  const [detailTab, setDetailTab] = useState<'Chapters' | 'About' | 'Community' | 'Characters'>(
+    'Chapters',
+  );
   const [chapterLimit, setChapterLimit] = useState(60);
   const chapterRequest = useRef(0);
   const [settings, setSettings] = useState<ReaderSettings>(defaults),
@@ -167,10 +170,18 @@ function Main() {
     [total, setTotal] = useState(0);
   const {
     saved: downloads,
-    progress: downloadState,
+    progress: queueProgress,
     queue: remainingDownload,
-    message: downloadMessage,
+    message: queueMessage,
+    messageNovelId,
+    removingNovelId,
   } = useDownloads();
+  const downloadState = remainingDownload?.novelId === detail?.novel.id ? queueProgress : '';
+  const downloadMessage = detail
+    ? messageNovelId === detail.novel.id
+      ? queueMessage
+      : ''
+    : queueMessage;
   const savedIds = detail ? downloads[detail.novel.id] || [] : [];
   const availableChapters =
     detail?.chapters.filter((c) => tab !== 'Downloads' || savedIds.includes(c.id)) || [];
@@ -180,8 +191,13 @@ function Main() {
       .includes(chapterQuery.trim().toLowerCase()),
   );
   const [progress, setProgress] = useState<
-    Record<string, { chapterId: string; offset: number; title: string }>
+    Record<string, { chapterId: string; offset: number; title: string; completed?: boolean }>
   >({});
+  const position = detail ? progress[detail.novel.id] : undefined;
+  const lastChapter = detail?.chapters.find((item) => item.id === position?.chapterId);
+  const readThrough = lastChapter
+    ? Math.max(0, (lastChapter.number ?? lastChapter.ordinal) - (position?.completed ? 0 : 1))
+    : 0;
   const continuing = library.find((n) => progress[n.id]);
   const [bookmarks, setBookmarks] = useState<string[]>([]);
   const scroll = useRef<React.ComponentRef<typeof ScrollView>>(null),
@@ -475,9 +491,16 @@ function Main() {
   }
   function saveProgress() {
     if (!chapter) return;
+    const previous = progress[chapter.novelId];
     const next = {
       ...progress,
-      [chapter.novelId]: { chapterId: chapter.id, offset: offset.current, title: chapter.title },
+      [chapter.novelId]: {
+        chapterId: chapter.id,
+        offset: offset.current,
+        title: chapter.title,
+        completed:
+          readingPercent >= 98 || (previous?.chapterId === chapter.id && previous.completed),
+      },
     };
     setProgress(next);
     void write('progress', next);
@@ -706,7 +729,7 @@ function Main() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Save current chapter offline"
-            disabled={savedIds.includes(chapter.id) || !!downloadState}
+            disabled={savedIds.includes(chapter.id) || !!queueProgress || !!removingNovelId}
             onPress={() => void downloadChapters([chapter])}
           >
             <Text style={{ color: settings.text }}>
@@ -936,7 +959,7 @@ function Main() {
                 <NovelAction
                   icon="download-outline"
                   label="Download range"
-                  disabled={!detail.chapters.length || !!downloadState}
+                  disabled={!detail.chapters.length || !!queueProgress || !!removingNovelId}
                   onPress={() => setRangePicker(true)}
                 />
               )}
@@ -971,6 +994,7 @@ function Main() {
                 [
                   ['Chapters', 'list-outline'],
                   ['About', 'information-circle-outline'],
+                  ['Characters', 'people-outline'],
                   ['Community', 'chatbubbles-outline'],
                 ] as const
               ).map(([label, icon]) => (
@@ -1006,6 +1030,13 @@ function Main() {
                   </View>
                 )}
               </View>
+            )}
+            {detailTab === 'Characters' && (
+              <Characters
+                key={detail.novel.id}
+                title={detail.novel.title}
+                readThrough={readThrough}
+              />
             )}
             {detailTab === 'Community' && (
               <>
@@ -1111,7 +1142,7 @@ function Main() {
                           accessibilityRole="button"
                           accessibilityLabel={`Download ${chapter.title}`}
                           style={s.detailIconButton}
-                          disabled={!!downloadState}
+                          disabled={!!queueProgress || !!removingNovelId}
                           onPress={() => void downloadChapters([chapter])}
                         >
                           <Ionicons name="download-outline" size={20} color="#60b5ff" />
@@ -1310,13 +1341,14 @@ function Main() {
               {Object.values(downloads).reduce((n, ids) => n + ids.length, 0)} chapters saved on
               this device
             </Text>
-            {downloadState && (
+            {queueProgress && (
               <View style={s.panel}>
-                <Text style={s.gold}>{downloadState}</Text>
+                <Text style={s.heading}>{remainingDownload?.title}</Text>
+                <Text style={s.gold}>{queueProgress}</Text>
                 <Button label="Pause download" onPress={pauseDownloads} />
               </View>
             )}
-            {!downloadState && remainingDownload && (
+            {!queueProgress && remainingDownload && (
               <View style={s.panel}>
                 <Text style={s.heading}>{remainingDownload.title}</Text>
                 <Text style={s.muted}>{remainingDownload.ids.length} chapters left</Text>
@@ -1344,8 +1376,9 @@ function Main() {
                   <View style={s.row}>
                     <Button label="Read" onPress={() => void openNovel(n)} />
                     <Button
-                      label="Remove downloads"
+                      label={removingNovelId === n.id ? 'Removing downloads…' : 'Remove downloads'}
                       secondary
+                      disabled={!!removingNovelId}
                       onPress={() => void deleteDownloads(n)}
                     />
                   </View>

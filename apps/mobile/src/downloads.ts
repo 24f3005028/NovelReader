@@ -12,13 +12,24 @@ type DownloadState = {
   active: boolean;
   progress: string;
   message: string;
+  messageNovelId?: string;
+  removingNovelId?: string;
 };
 
 let state: DownloadState = { saved: {}, queue: null, active: false, progress: '', message: '' };
 const listeners = new Set<() => void>();
 let loading: Promise<DownloadState> | undefined;
 let paused = false;
-let removing = false;
+let queueChanging = false;
+let runDone = Promise.resolve();
+let finishRun: (() => void) | undefined;
+let savedMutation = Promise.resolve();
+
+function updateSaved(work: () => Promise<void>) {
+  const result = savedMutation.then(work);
+  savedMutation = result.catch(() => {});
+  return result;
+}
 
 function publish(patch: Partial<DownloadState>) {
   state = { ...state, ...patch };
@@ -48,7 +59,7 @@ export function loadDownloads() {
       loading = undefined;
       throw error;
     });
-  return loading;
+  return loading.then(() => state);
 }
 
 export function pauseDownloads() {
@@ -57,10 +68,11 @@ export function pauseDownloads() {
 
 export async function startDownloads(request: Queue) {
   await loadDownloads();
-  if (state.active || removing) return;
+  if (state.active || state.removingNovelId || queueChanging) return;
   if (state.queue && state.queue.novelId !== request.novelId) {
     publish({
       message: 'Resume or clear the paused download from Downloads before starting another book.',
+      messageNovelId: request.novelId,
     });
     return;
   }
@@ -70,12 +82,24 @@ export async function startDownloads(request: Queue) {
   );
   if (!ids.length) {
     await clearDownloadQueue();
-    publish({ message: 'These chapters are already saved offline.' });
+    publish({
+      message: 'These chapters are already saved offline.',
+      messageNovelId: request.novelId,
+    });
     return;
   }
   const queue = { ...request, ids };
   paused = false;
-  publish({ active: true, queue, progress: `Preparing ${ids.length} chapters…`, message: '' });
+  runDone = new Promise((resolve) => {
+    finishRun = resolve;
+  });
+  publish({
+    active: true,
+    queue,
+    progress: `Preparing ${ids.length} chapters…`,
+    message: '',
+    messageNovelId: queue.novelId,
+  });
   try {
     await write('downloadQueue', queue);
     await runDownloadTask(() => processQueue(queue), ids.length, pauseDownloads);
@@ -85,6 +109,7 @@ export async function startDownloads(request: Queue) {
       progress: '',
       message: readerMessage(error, 'Couldn’t start the download. Tap Resume to try again.'),
     });
+    finishRun?.();
   }
 }
 
@@ -106,13 +131,15 @@ async function processQueue(queue: Queue) {
       try {
         const content = (await localChapter(id)) || (await fetchChapterOnDemand(id, () => paused));
         if (paused) break;
-        await saveChapter(content);
-        const saved = {
-          ...state.saved,
-          [queue.novelId]: [...(state.saved[queue.novelId] || []), id],
-        };
-        await write('downloads', saved);
-        publish({ saved });
+        await updateSaved(async () => {
+          await saveChapter(content);
+          const saved = {
+            ...state.saved,
+            [queue.novelId]: [...new Set([...(state.saved[queue.novelId] || []), id])],
+          };
+          await write('downloads', saved);
+          publish({ saved });
+        });
         savedCount++;
         consecutiveFailures = 0;
         await updateDownloadNotification(savedCount, queue.ids.length).catch(() => {});
@@ -137,30 +164,42 @@ async function processQueue(queue: Queue) {
     });
   } finally {
     publish({ active: false, progress: '' });
+    finishRun?.();
   }
 }
 
 export async function clearDownloadQueue() {
-  if (state.active || removing) return;
-  removing = true;
+  if (state.active || state.removingNovelId || queueChanging) return;
+  queueChanging = true;
   try {
     await write('downloadQueue', null);
     publish({ queue: null, message: '' });
   } finally {
-    removing = false;
+    queueChanging = false;
   }
 }
 
 export async function deleteSavedChapters(novelId: string) {
-  if (state.active || removing) return;
-  removing = true;
+  await loadDownloads();
+  if (state.removingNovelId || queueChanging) return;
+  publish({ removingNovelId: novelId });
   try {
-    await removeChapters(state.saved[novelId] || []);
-    const saved = { ...state.saved };
-    delete saved[novelId];
-    await write('downloads', saved);
-    publish({ saved });
+    if (state.queue?.novelId === novelId) {
+      if (state.active) {
+        pauseDownloads();
+        await runDone;
+      }
+      await write('downloadQueue', null);
+      publish({ queue: null, message: '', messageNovelId: undefined });
+    }
+    await updateSaved(async () => {
+      await removeChapters(state.saved[novelId] || []);
+      const saved = { ...state.saved };
+      delete saved[novelId];
+      await write('downloads', saved);
+      publish({ saved });
+    });
   } finally {
-    removing = false;
+    publish({ removingNovelId: undefined });
   }
 }

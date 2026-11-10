@@ -23,8 +23,10 @@ export async function putChapter(chapter: ChapterContent) {
   );
 }
 export async function removeChapters(ids: string[]) {
+  if (!ids.length) return;
   const db = await database;
-  await db.withTransactionAsync(async () => {
-    for (const id of ids) await db.runAsync('DELETE FROM offline_chapters WHERE id=?', id);
-  });
+  await db.runAsync(
+    'DELETE FROM offline_chapters WHERE id IN (SELECT value FROM json_each(?))',
+    JSON.stringify(ids),
+  );
 }

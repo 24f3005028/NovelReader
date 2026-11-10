@@ -358,7 +358,6 @@ export const s = StyleSheet.create({
   detailTab: {
     flex: 1,
     paddingVertical: 12,
-    flexDirection: 'row',
     gap: 5,
     justifyContent: 'center',
     alignItems: 'center',
