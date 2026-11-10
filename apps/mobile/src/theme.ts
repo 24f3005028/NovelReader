@@ -382,14 +382,6 @@ export const s = StyleSheet.create({
   },
   track: { height: 4, backgroundColor: '#192c45', borderRadius: 3, overflow: 'hidden' },
   fill: { height: 4, backgroundColor: '#168bff' },
-  readerTop: {
-    flexDirection: 'row',
-    paddingHorizontal: 24,
-    paddingVertical: 16,
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#7f99bb15',
-  },
   readerActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -398,12 +390,20 @@ export const s = StyleSheet.create({
     paddingHorizontal: 24,
     minHeight: 44,
   },
-  reading: {
-    paddingHorizontal: 25,
-    paddingTop: 30,
-    paddingBottom: 50,
-    maxWidth: 740,
-    width: '100%',
+  readerSheetBackdrop: { flex: 1, backgroundColor: '#0008', justifyContent: 'flex-end' },
+  readerSheet: {
+    backgroundColor: palette.background,
+    maxHeight: '78%',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    overflow: 'hidden',
+  },
+  readerSheetHandle: {
+    width: 34,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: palette.border,
+    marginVertical: 10,
     alignSelf: 'center',
   },
 });

@@ -42,6 +42,7 @@ import { DiscoveryShelves, RatingPanel, DiscussionPanel } from './src/components
 import { ChapterPicker, DownloadRange } from './src/components/ChapterTools';
 import { NovelAction, NovelHeader } from './src/components/NovelHeader';
 import { Characters } from './src/components/Characters';
+import { ChapterReader } from './src/components/ChapterReader';
 import {
   defaults,
   localChapter,
@@ -153,6 +154,7 @@ function Main() {
   const [chapterPicker, setChapterPicker] = useState(false);
   const [rangePicker, setRangePicker] = useState(false);
   const [readingPercent, setReadingPercent] = useState(0);
+  const [readerControls, setReaderControls] = useState(false);
   const [retryChapter, setRetryChapter] = useState<Chapter | null>(null);
   const [chapterQuery, setChapterQuery] = useState('');
   const [detailTab, setDetailTab] = useState<'Chapters' | 'About' | 'Community' | 'Characters'>(
@@ -200,8 +202,7 @@ function Main() {
     : 0;
   const continuing = library.find((n) => progress[n.id]);
   const [bookmarks, setBookmarks] = useState<string[]>([]);
-  const scroll = useRef<React.ComponentRef<typeof ScrollView>>(null),
-    offset = useRef(0);
+  const offset = useRef(0);
 
   useEffect(() => {
     void (async () => {
@@ -317,6 +318,10 @@ function Main() {
       return true;
     }
     if (chapter) {
+      if (readerControls) {
+        setReaderControls(false);
+        return true;
+      }
       closeChapter();
       return true;
     }
@@ -507,6 +512,7 @@ function Main() {
   }
   function closeChapter() {
     saveProgress();
+    setReaderControls(false);
     chapterRequest.current++;
     setChapterLoading('');
     setBusy(false);
@@ -672,155 +678,72 @@ function Main() {
       </View>
     );
   if (chapter) {
-    const index = availableChapters.findIndex((c) => c.id === chapter.id);
+    const index = availableChapters.findIndex((item) => item.id === chapter.id);
     const previous = index > 0 ? availableChapters[index - 1] : undefined;
     const next = index >= 0 ? availableChapters[index + 1] : undefined;
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: settings.background }}>
-        <StatusBar style={settings.theme === 'night' ? 'light' : 'dark'} />
-        <View style={s.readerTop}>
-          <Pressable accessibilityLabel="Back to chapters" onPress={closeChapter}>
-            <Text style={{ color: settings.text, fontSize: 24 }}>‹</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open chapter list"
-            onPress={() => setChapterPicker(true)}
-            style={{ flex: 1, marginHorizontal: 16, minHeight: 44, justifyContent: 'center' }}
-          >
-            <Text numberOfLines={1} style={{ color: settings.text, fontWeight: '700' }}>
-              {chapterLoading
-                ? 'Loading chapter…'
-                : `Chapter ${chapter.number ?? chapter.ordinal} ▾`}
-            </Text>
-            <Text style={{ color: settings.text, opacity: 0.65, fontSize: 12 }}>
-              {readingPercent}% read
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Bookmark chapter"
-            onPress={() => {
-              const next = bookmarks.includes(chapter.id)
-                ? bookmarks.filter((id) => id !== chapter.id)
-                : [...bookmarks, chapter.id];
-              setBookmarks(next);
-              void write('bookmarks', next);
-            }}
-          >
-            <Text style={{ color: settings.text, fontSize: 21 }}>
-              {bookmarks.includes(chapter.id) ? '★' : '☆'}
-            </Text>
-          </Pressable>
-          <Pressable accessibilityLabel="Reading preferences" onPress={() => setShowSettings(true)}>
-            <Text style={{ color: settings.text, fontSize: 21, marginLeft: 22 }}>Aa</Text>
-          </Pressable>
-        </View>
-        <View style={s.readerActions}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Previous chapter"
-            disabled={!previous || !!chapterLoading}
-            onPress={() => previous && void openChapter(previous)}
-          >
-            <Text style={{ color: settings.text, opacity: previous && !chapterLoading ? 1 : 0.35 }}>
-              ‹ Previous
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Save current chapter offline"
-            disabled={savedIds.includes(chapter.id) || !!queueProgress || !!removingNovelId}
-            onPress={() => void downloadChapters([chapter])}
-          >
-            <Text style={{ color: settings.text }}>
-              {savedIds.includes(chapter.id) ? '✓ Saved' : '↓ Save'}
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Next chapter"
-            disabled={!next || !!chapterLoading}
-            onPress={() => next && void openChapter(next)}
-          >
-            <Text
-              style={{
-                color: settings.text,
-                opacity: next && !chapterLoading ? 1 : 0.35,
-                fontWeight: '700',
-              }}
-            >
-              Next ›
-            </Text>
-          </Pressable>
-        </View>
-        <View style={[s.track, { height: 2 }]}>
-          <View style={[s.fill, { width: `${readingPercent}%` }]} />
-        </View>
-        <ScrollView
-          key={chapter.id}
-          ref={scroll}
-          contentContainerStyle={s.reading}
-          onContentSizeChange={() =>
-            scroll.current?.scrollTo({ y: offset.current, animated: false })
-          }
-          onScroll={(e) => {
-            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-            offset.current = Math.max(0, contentOffset.y);
-            const length = contentSize.height - layoutMeasurement.height;
-            setReadingPercent(
-              length > 0 ? Math.min(100, Math.round((100 * offset.current) / length)) : 100,
-            );
-          }}
-          scrollEventThrottle={200}
-          onScrollEndDrag={saveProgress}
-          onMomentumScrollEnd={saveProgress}
-        >
-          <Text
-            style={[
-              readerText,
-              {
-                fontSize: settings.size + 12,
-                lineHeight: (settings.size + 12) * 1.4,
-                marginBottom: 28,
-              },
-            ]}
-          >
-            {chapter.title}
-          </Text>
-          {chapter.paragraphs.map((p, i) => (
-            <Text selectable key={i} style={[readerText, { marginBottom: settings.size }]}>
-              {p}
-            </Text>
-          ))}
-          <View style={s.row}>
-            <Button
-              label="← Previous"
-              secondary
-              disabled={!previous || !!chapterLoading}
-              onPress={() => previous && void openChapter(previous)}
-            />
-            <Button
-              label="Next chapter →"
-              disabled={!next || !!chapterLoading}
-              onPress={() => next && void openChapter(next)}
-            />
-          </View>
-        </ScrollView>
-        {!!error && (
-          <View style={s.readerActions}>
-            <Text style={[s.error, { flex: 1 }]}>{error}</Text>
-            {retryChapter && (
-              <Button label="Try again" secondary onPress={() => void openChapter(retryChapter)} />
+      <ChapterReader
+        chapter={chapter}
+        novel={detail?.novel.title || ''}
+        settings={settings}
+        textStyle={readerText}
+        offsetRef={offset}
+        percent={readingPercent}
+        controls={readerControls}
+        loading={!!chapterLoading}
+        bookmarked={bookmarks.includes(chapter.id)}
+        saved={savedIds.includes(chapter.id)}
+        downloadDisabled={!!queueProgress || !!removingNovelId}
+        onControls={setReaderControls}
+        onBack={closeChapter}
+        onContents={() => {
+          setReaderControls(false);
+          setChapterPicker(true);
+        }}
+        onSettings={() => setShowSettings(true)}
+        onTheme={() => {
+          const theme = settings.theme === 'night' ? 'paper' : 'night';
+          changeSettings({ theme, ...presets[theme] });
+        }}
+        onBookmark={() => {
+          const next = bookmarks.includes(chapter.id)
+            ? bookmarks.filter((id) => id !== chapter.id)
+            : [...bookmarks, chapter.id];
+          setBookmarks(next);
+          void write('bookmarks', next).catch((e) => setError(message(e)));
+        }}
+        onDownload={() => void downloadChapters([chapter])}
+        onPrevious={previous && (() => void openChapter(previous))}
+        onNext={next && (() => void openChapter(next))}
+        onProgress={(percent, y) => {
+          offset.current = y;
+          setReadingPercent(percent);
+        }}
+        onSavePosition={saveProgress}
+        feedback={
+          <>
+            {!!error && (
+              <View style={s.readerActions}>
+                <Text style={[s.error, { flex: 1 }]}>{error}</Text>
+                {retryChapter && (
+                  <Button
+                    label="Try again"
+                    secondary
+                    onPress={() => void openChapter(retryChapter)}
+                  />
+                )}
+              </View>
             )}
-          </View>
-        )}
-        {!!downloadState && (
-          <View style={s.readerActions}>
-            <Text style={s.gold}>{downloadState}</Text>
-            <Button label="Pause" secondary onPress={pauseDownloads} />
-          </View>
-        )}
-        {!downloadState && !!downloadMessage && <Text style={s.notice}>{downloadMessage}</Text>}
+            {!!downloadState && (
+              <View style={s.readerActions}>
+                <Text style={s.gold}>{downloadState}</Text>
+                <Button label="Pause" secondary onPress={pauseDownloads} />
+              </View>
+            )}
+            {!downloadState && !!downloadMessage && <Text style={s.notice}>{downloadMessage}</Text>}
+          </>
+        }
+      >
         {chapterPicker && (
           <ChapterPicker
             chapters={availableChapters}
@@ -837,16 +760,26 @@ function Main() {
         <Modal
           visible={showSettings}
           animationType="slide"
+          transparent
           onRequestClose={() => setShowSettings(false)}
         >
-          <SafeAreaView style={s.container}>
-            <ScrollView contentContainerStyle={s.content}>
-              <Button label="Done" onPress={() => setShowSettings(false)} />
-              {settingsPanel()}
-            </ScrollView>
-          </SafeAreaView>
+          <View style={s.readerSheetBackdrop}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close display settings"
+              style={{ flex: 1 }}
+              onPress={() => setShowSettings(false)}
+            />
+            <SafeAreaView edges={['bottom', 'left', 'right']} style={s.readerSheet}>
+              <View style={s.readerSheetHandle} />
+              <ScrollView contentContainerStyle={s.content}>
+                <Button label="Done" onPress={() => setShowSettings(false)} />
+                {settingsPanel()}
+              </ScrollView>
+            </SafeAreaView>
+          </View>
         </Modal>
-      </SafeAreaView>
+      </ChapterReader>
     );
   }
   return (
