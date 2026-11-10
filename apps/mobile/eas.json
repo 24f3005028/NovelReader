@@ -3,6 +3,10 @@
   "build": {
     "development": { "developmentClient": true, "distribution": "internal" },
     "preview": { "distribution": "internal", "android": { "buildType": "apk" } },
+    "android-phone": {
+      "extends": "preview",
+      "android": { "gradleCommand": ":app:assembleRelease -PreactNativeArchitectures=arm64-v8a" }
+    },
     "production": { "autoIncrement": true }
   },
   "submit": { "production": {} }

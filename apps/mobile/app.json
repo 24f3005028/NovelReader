@@ -27,6 +27,7 @@
       "expo-sqlite",
       "expo-router",
       "expo-font",
+      "./plugins/withChapterDownloads.js",
       [
         "expo-splash-screen",
         {
