@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   BackHandler,
   Image,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -29,31 +30,75 @@ import {
 import type {
   Chapter,
   ChapterContent,
+  CatalogSort,
+  ImportJob,
   Novel,
   NovelDetail,
   DiscoveryFeed,
   RatingSummary,
   RedditDiscussion,
 } from '@novelreader/shared';
-import { deduplicateNovels, normalizeNovelTitle } from '@novelreader/shared';
+import { chapterBatchSize, deduplicateNovels, normalizeNovelTitle } from '@novelreader/shared';
 import { api, readerMessage } from './src/api';
-import { fetchChapterOnDemand } from './src/chapter-service';
+import { fetchChapterOnDemand, requestChapterBatch } from './src/chapter-service';
 import { DiscoveryShelves, RatingPanel, DiscussionPanel } from './src/components/Community';
 import { ChapterPicker, DownloadRange } from './src/components/ChapterTools';
 import { NovelAction, NovelHeader } from './src/components/NovelHeader';
 import { Characters } from './src/components/Characters';
 import { ChapterReader } from './src/components/ChapterReader';
 import {
+  LibraryActions,
+  LibraryBrowser,
+  libraryKey,
+  type LibraryEntry,
+  type ReadingPosition,
+  type ChapterNotes,
+} from './src/components/Library';
+import {
   defaults,
   localChapter,
   presets,
   read,
+  readDetail,
   ReaderSettings,
   saveDetail,
   write,
 } from './src/storage';
 
 type Tab = 'Discover' | 'Library' | 'Downloads' | 'Settings';
+const sortOptions: [CatalogSort, string][] = [
+  ['default', 'Default'],
+  ['chapters', 'Most chapters'],
+  ['title', 'Title A–Z'],
+];
+function resumeChapter(chapters: Chapter[], position?: ReadingPosition) {
+  const index = chapters.findIndex((item) => item.id === position?.chapterId);
+  if (index < 0) return chapters[0];
+  return (position?.completed && chapters[index + 1]) || chapters[index];
+}
+
+function FilterChip({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={[s.genreChip, selected && s.genreActive]}
+    >
+      <Text style={{ color: selected ? '#74bcff' : '#8591a5', fontSize: 12, fontWeight: '600' }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
 const colors = ['#122747', '#1b2444', '#102c3b', '#23213f', '#112940'];
 const demoCovers: Record<string, number> = {
   'the-last-starkeeper': require('./assets/covers/starkeeper.png'),
@@ -61,6 +106,21 @@ const demoCovers: Record<string, number> = {
   'ink-and-thunder': require('./assets/covers/ink.png'),
 };
 const message = readerMessage;
+async function loadNovelDetail(id: string, preferOffline: boolean) {
+  if (preferOffline) {
+    const cached = await readDetail(id);
+    if (cached) return cached;
+  }
+  try {
+    const detail = await api<NovelDetail>(`/novels/${id}`);
+    void saveDetail(detail).catch(() => {});
+    return detail;
+  } catch (error) {
+    const cached = await readDetail(id);
+    if (!cached) throw error;
+    return cached;
+  }
+}
 function Button({
   label,
   onPress,
@@ -146,7 +206,28 @@ function Main() {
   const [novels, setNovels] = useState<Novel[]>([]),
     [library, setLibrary] = useState<Novel[]>([]),
     [query, setQuery] = useState('');
-  const [genre, setGenre] = useState('All');
+  const [genre, setGenre] = useState('');
+  const [genres, setGenres] = useState<string[]>([]);
+  const [sort, setSort] = useState<CatalogSort>('default');
+  const [completed, setCompleted] = useState(false);
+  const [redditOnly, setRedditOnly] = useState(false);
+  const [webnovelOnly, setWebnovelOnly] = useState(false);
+  const [webnovelLink, setWebnovelLink] = useState('');
+  const [addingBook, setAddingBook] = useState(false);
+  const catalogKey = JSON.stringify([
+    query.trim(),
+    genre,
+    sort,
+    completed,
+    redditOnly,
+    webnovelOnly,
+  ]);
+  const homeCatalog =
+    !query.trim() && !genre && sort === 'default' && !completed && !redditOnly && !webnovelOnly;
+  const [loadedCatalog, setLoadedCatalog] = useState(catalogKey);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogError, setCatalogError] = useState('');
+  const catalogRequest = useRef(0);
   const featured = novels.find((n) => n.id === 'the-last-starkeeper') || novels[0];
   const [detail, setDetail] = useState<NovelDetail | null>(null),
     [chapter, setChapter] = useState<ChapterContent | null>(null);
@@ -154,12 +235,13 @@ function Main() {
   const [chapterPicker, setChapterPicker] = useState(false);
   const [rangePicker, setRangePicker] = useState(false);
   const [readingPercent, setReadingPercent] = useState(0);
+  const lastPercent = useRef(0);
   const [readerControls, setReaderControls] = useState(false);
   const [retryChapter, setRetryChapter] = useState<Chapter | null>(null);
   const [chapterQuery, setChapterQuery] = useState('');
-  const [detailTab, setDetailTab] = useState<'Chapters' | 'About' | 'Community' | 'Characters'>(
-    'Chapters',
-  );
+  const [detailTab, setDetailTab] = useState<
+    'Chapters' | 'About' | 'Community' | 'Characters' | 'Notes'
+  >('Chapters');
   const [chapterLimit, setChapterLimit] = useState(60);
   const chapterRequest = useRef(0);
   const [settings, setSettings] = useState<ReaderSettings>(defaults),
@@ -192,29 +274,38 @@ function Main() {
       .toLowerCase()
       .includes(chapterQuery.trim().toLowerCase()),
   );
-  const [progress, setProgress] = useState<
-    Record<string, { chapterId: string; offset: number; title: string; completed?: boolean }>
-  >({});
+  const [progress, setProgress] = useState<Record<string, ReadingPosition>>({});
+  const [libraryEntries, setLibraryEntries] = useState<Record<string, LibraryEntry>>({});
+  const [notes, setNotes] = useState<ChapterNotes>({});
   const position = detail ? progress[detail.novel.id] : undefined;
   const lastChapter = detail?.chapters.find((item) => item.id === position?.chapterId);
   const readThrough = lastChapter
     ? Math.max(0, (lastChapter.number ?? lastChapter.ordinal) - (position?.completed ? 0 : 1))
     : 0;
-  const continuing = library.find((n) => progress[n.id]);
+  const continuing = library
+    .filter(
+      (n) =>
+        progress[n.id] &&
+        !['Archived', 'Finished'].includes(libraryEntries[libraryKey(n)]?.shelf || ''),
+    )
+    .sort((a, b) => (progress[b.id]?.updatedAt ?? 0) - (progress[a.id]?.updatedAt ?? 0))[0];
   const [bookmarks, setBookmarks] = useState<string[]>([]);
   const offset = useRef(0);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [lib, opts, { saved: dl }, prog, marks, cached] = await Promise.all([
-          read<Novel[]>('library', []),
-          read('settings', defaults),
-          loadDownloads(),
-          read<typeof progress>('progress', {}),
-          read<string[]>('bookmarks', []),
-          read<Novel[]>('catalog', []),
-        ]);
+        const [lib, opts, { saved: dl }, prog, marks, cached, entries, savedNotes] =
+          await Promise.all([
+            read<Novel[]>('library', []),
+            read('settings', defaults),
+            loadDownloads(),
+            read<typeof progress>('progress', {}),
+            read<string[]>('bookmarks', []),
+            read<Novel[]>('catalog', []),
+            read<Record<string, LibraryEntry>>('libraryEntries', {}),
+            read<ChapterNotes>('chapterNotes', {}),
+          ]);
         const preferred = new Map<string, Novel>();
         for (const novel of lib) {
           const key = novel.catalogKey || normalizeNovelTitle(novel.title);
@@ -225,9 +316,15 @@ function Main() {
         const cleaned = [...preferred.values()];
         setLibrary(cleaned);
         if (cleaned.length !== lib.length) await write('library', cleaned);
-        setSettings(opts.background === '#111820' ? { ...opts, ...presets.night } : opts);
+        setSettings({
+          ...defaults,
+          ...opts,
+          ...(opts.background === '#111820' ? presets.night : {}),
+        });
         setProgress(prog);
         setBookmarks(marks);
+        setLibraryEntries(entries);
+        setNotes(savedNotes);
         setNovels(deduplicateNovels(cached));
         let identity = await read('readerId', '');
         if (!identity) {
@@ -243,11 +340,17 @@ function Main() {
     })();
   }, []);
   const loadFirstPage = useEffectEvent(() => void loadNovels(1));
+  const cancelCatalogRequest = useEffectEvent(() => {
+    catalogRequest.current++;
+  });
   const refreshFeed = useEffectEvent(() => void loadFeed());
+  const readingGenres = [...new Set(library.flatMap((novel) => novel.genres))]
+    .slice(0, 8)
+    .join(',');
   const communityNovelId = detail?.novel.id;
   useEffect(() => {
     if (ready) refreshFeed();
-  }, [ready]);
+  }, [ready, readingGenres]);
   useEffect(() => {
     if (!communityNovelId || !readerId) return;
     let active = true;
@@ -267,11 +370,15 @@ function Main() {
   useEffect(() => {
     if (!ready) return;
     const timer = setTimeout(loadFirstPage, 300);
-    return () => clearTimeout(timer);
-  }, [ready, query, genre]);
+    return () => {
+      clearTimeout(timer);
+      cancelCatalogRequest();
+    };
+  }, [ready, catalogKey]);
   useEffect(() => {
     if (!ready) return;
-    if (!params.novel) {
+    const novelId = params.novel;
+    if (!novelId) {
       setDetail(null);
       setChapter(null);
       return;
@@ -279,21 +386,19 @@ function Main() {
     let active = true;
     void (async () => {
       try {
-        let d =
-          detail?.novel.id === params.novel
-            ? detail
-            : await read<NovelDetail | null>(`novel:${params.novel}`, null);
-        if (!d) d = await api<NovelDetail>(`/novels/${params.novel}`);
+        const d =
+          detail?.novel.id === novelId ? detail : await loadNovelDetail(novelId, tab === 'Downloads');
         if (!active) return;
         setDetail(d);
-        await saveDetail(d);
         if (params.chapter && chapter?.id !== params.chapter) {
           const c =
             (await localChapter(params.chapter)) ||
-            (await fetchChapterOnDemand(params.chapter, () => !active));
+            (await fetchChapterOnDemand(d.novel.id, params.chapter, () => !active));
           if (active) {
             offset.current =
               progress[c.novelId]?.chapterId === c.id ? progress[c.novelId].offset : 0;
+            lastPercent.current = 0;
+            setReadingPercent(0);
             setChapter(c);
           }
         } else if (!params.chapter) setChapter(null);
@@ -307,11 +412,52 @@ function Main() {
     // Route changes hydrate from local storage; in-flight imports update detail separately.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, params.novel, params.chapter]);
+  const indexNovelId = detail?.novel.id;
+  const waitingForIndex = Boolean(detail?.chapterIndexPending && !detail.job);
+  const indexing = detail?.job?.status === 'queued' || detail?.job?.status === 'running';
   useEffect(() => {
-    if (!detail?.job || !['queued', 'running'].includes(detail.job.status)) return;
-    const timer = setInterval(() => void refreshDetail(detail.novel.id), 1500);
+    if (!indexNovelId || (!waitingForIndex && !indexing)) return;
+    const timer = setInterval(
+      () => void refreshDetail(indexNovelId),
+      waitingForIndex ? 8000 : 2500,
+    );
     return () => clearInterval(timer);
-  }, [detail?.novel.id, detail?.job]);
+  }, [indexNovelId, waitingForIndex, indexing]);
+  const preloadedNovel = useRef<string | undefined>(undefined);
+  const preloadBatch = useEffectEvent(() => {
+    if (!detail) {
+      preloadedNovel.current = undefined;
+      return;
+    }
+    const { novel, chapters } = detail;
+    if (
+      preloadedNovel.current === novel.id ||
+      tab === 'Downloads' ||
+      !chapters.length ||
+      novel.source === 'demo' ||
+      indexing
+    )
+      return;
+    preloadedNovel.current = novel.id;
+    const position = progress[novel.id];
+    const openedAt = Math.max(
+      0,
+      chapters.findIndex((item) => item.id === (params.chapter || position?.chapterId)),
+    );
+    const index = Math.min(
+      chapters.length - 1,
+      openedAt + Number(!params.chapter && Boolean(position?.completed)),
+    );
+    const start = Math.floor(index / chapterBatchSize) * chapterBatchSize;
+    const candidate = [chapters[index], ...chapters.slice(start, start + chapterBatchSize)].find(
+      (item) => !item.locked && !item.downloaded,
+    );
+    if (candidate) void requestChapterBatch(novel.id, candidate.id, true).catch(() => {});
+  });
+  const indexedChapterCount = detail?.chapters.length ?? 0;
+  useEffect(() => {
+    preloadBatch();
+  }, [indexNovelId, indexedChapterCount, indexing, tab]);
   const onHardwareBack = useEffectEvent(() => {
     if (showSettings) {
       setShowSettings(false);
@@ -337,27 +483,50 @@ function Main() {
     return () => subscription.remove();
   }, []);
   async function loadNovels(next: number) {
-    setBusy(true);
-    setError('');
+    const request = ++catalogRequest.current;
+    setCatalogBusy(true);
+    setCatalogError('');
     try {
+      const params = new URLSearchParams({
+        q: query.trim(),
+        genre,
+        sort,
+        page: String(next),
+        completed: String(completed),
+        reddit: String(redditOnly),
+        source: webnovelOnly ? 'webnovel' : '',
+      });
       const data = await api<{ items: Novel[]; total: number; hasMore: boolean }>(
-        `/novels?q=${encodeURIComponent(query)}&genre=${encodeURIComponent(genre === 'All' ? '' : genre)}&page=${next}`,
+        `/novels?${params}`,
       );
+      if (catalogRequest.current !== request) return;
       setNovels((old) => deduplicateNovels(next === 1 ? data.items : [...old, ...data.items]));
+      setLoadedCatalog(catalogKey);
       setPage(next);
       setTotal(data.total);
       setHasMore(data.hasMore);
-      if (next === 1 && !query && genre === 'All') await write('catalog', data.items);
+      if (next === 1 && homeCatalog) void write('catalog', data.items).catch(() => {});
     } catch (e) {
-      setError(`${message(e)} · Saved books remain available offline.`);
+      if (catalogRequest.current === request) setCatalogError(message(e));
     } finally {
-      setBusy(false);
+      if (catalogRequest.current === request) setCatalogBusy(false);
+    }
+  }
+  async function loadGenres() {
+    try {
+      const available = await api<string[]>('/genres');
+      setGenres(available);
+      await write('genres', available);
+    } catch {
+      setGenres(await read<string[]>('genres', []));
     }
   }
   async function loadFeed() {
+    void loadGenres();
     try {
-      const genres = [...new Set(library.flatMap((n) => n.genres))].slice(0, 8).join(',');
-      const data = await api<DiscoveryFeed>(`/discover?genres=${encodeURIComponent(genres)}`);
+      const data = await api<DiscoveryFeed>(
+        `/discover?genres=${encodeURIComponent(readingGenres)}`,
+      );
       setFeed(data);
       await write('discover', data);
     } catch {
@@ -410,7 +579,7 @@ function Main() {
       await saveDetail(d);
     } catch {}
   }
-  async function openNovel(n: Novel) {
+  async function openNovel(n: Novel, resume = false) {
     setRetryChapter(null);
     setDetailTab('Chapters');
     setRating({ average: null, count: 0, userRating: null });
@@ -418,36 +587,58 @@ function Main() {
     const previous = library.find(
       (book) => normalizeNovelTitle(book.title) === normalizeNovelTitle(n.title),
     );
-    if (previous && (downloads[previous.id]?.length || progress[previous.id])) n = previous;
+    if (
+      previous &&
+      (!webnovelOnly || tab !== 'Discover') &&
+      (downloads[previous.id]?.length || progress[previous.id])
+    )
+      n = previous;
     setChapterQuery('');
     setChapterLimit(60);
     setError('');
     setBusy(true);
     setChapter(null);
     try {
-      let d: NovelDetail;
-      const saved = await read<NovelDetail | null>(`novel:${n.id}`, null);
-      try {
-        d = tab === 'Downloads' && saved ? saved : await api<NovelDetail>(`/novels/${n.id}`);
-        await saveDetail(d);
-      } catch (e) {
-        const cached = await read<NovelDetail | null>(`novel:${n.id}`, null);
-        if (!cached) throw e;
-        d = cached;
-      }
+      const d = await loadNovelDetail(n.id, tab === 'Downloads');
       setDetail(d);
       if (readerId)
         void api('/activity', 'POST', { novelId: d.novel.id, readerId, action: 'open' }).catch(
           () => {},
         );
       router.setParams({ novel: n.id, chapter: undefined });
-      await keepNovel(d.novel);
-      if (tab !== 'Downloads' && n.source !== 'demo' && (!d.job || d.job.status === 'cancelled'))
-        await startImport(n.id);
+      if (
+        !previous ||
+        previous.id === d.novel.id ||
+        (!downloads[previous.id]?.length && !progress[previous.id])
+      )
+        await keepNovel(d.novel);
+      if (resume) {
+        const next = resumeChapter(d.chapters, progress[d.novel.id]);
+        if (next) await openChapter(next);
+      }
     } catch (e) {
       setError(message(e));
     } finally {
       setBusy(false);
+    }
+  }
+  async function addWebnovel() {
+    const url = webnovelLink.trim();
+    if (!/^https:\/\/(?:www\.)?webnovel\.com\/book\/(?:[^/?#]+_)?\d+\/?(?:[?#].*)?$/i.test(url)) {
+      setCatalogError('Paste a Webnovel book page link.');
+      return;
+    }
+    setAddingBook(true);
+    setCatalogError('');
+    try {
+      const { novel } = await api<{ novel: Novel; job: ImportJob }>('/imports', 'POST', { url });
+      setWebnovelLink('');
+      void loadNovels(1);
+      await openNovel(novel);
+    } catch (error) {
+      setCatalogError(message(error, 'Couldn’t add this Webnovel book.'));
+    } finally {
+      setAddingBook(false);
     }
   }
   async function startImport(id: string) {
@@ -461,6 +652,14 @@ function Main() {
     }
   }
   async function openChapter(c: Chapter) {
+    if (c.locked) {
+      try {
+        await Linking.openURL(c.url);
+      } catch {
+        setError('Couldn’t open the locked chapter on Webnovel.');
+      }
+      return;
+    }
     if (chapter?.id === c.id || chapterLoading) return;
     saveProgress();
     const request = ++chapterRequest.current;
@@ -471,12 +670,15 @@ function Main() {
     try {
       const local = await localChapter(c.id);
       const value =
-        local || (await fetchChapterOnDemand(c.id, () => request !== chapterRequest.current));
+        local ||
+        (await fetchChapterOnDemand(c.novelId, c.id, () => request !== chapterRequest.current));
       if (request !== chapterRequest.current) return;
       const position = progress[c.novelId];
       offset.current = position?.chapterId === c.id ? position.offset : 0;
+      lastPercent.current = 0;
       setReadingPercent(0);
       setChapter(value);
+      rememberPosition(c, offset.current);
       if (readerId)
         void api('/activity', 'POST', { novelId: c.novelId, readerId, action: 'read' }).catch(
           () => {},
@@ -494,21 +696,38 @@ function Main() {
       }
     }
   }
+  function rememberPosition(chapter: Chapter, y: number, completed = false) {
+    const updatedAt = Date.now();
+    setProgress((current) => {
+      const previous = current[chapter.novelId];
+      const next = {
+        ...current,
+        [chapter.novelId]: {
+          chapterId: chapter.id,
+          title: chapter.title,
+          offset: y,
+          updatedAt,
+          completed: completed || (previous?.chapterId === chapter.id && previous.completed),
+        },
+      };
+      void write('progress', next).catch(() => {});
+      return next;
+    });
+  }
   function saveProgress() {
-    if (!chapter) return;
-    const previous = progress[chapter.novelId];
-    const next = {
-      ...progress,
-      [chapter.novelId]: {
-        chapterId: chapter.id,
-        offset: offset.current,
-        title: chapter.title,
-        completed:
-          readingPercent >= 98 || (previous?.chapterId === chapter.id && previous.completed),
-      },
-    };
-    setProgress(next);
-    void write('progress', next);
+    if (chapter) rememberPosition(chapter, offset.current, lastPercent.current >= 98);
+  }
+  function updateLibraryEntry(novel: Novel, entry: LibraryEntry) {
+    const next = { ...libraryEntries, [libraryKey(novel)]: entry };
+    setLibraryEntries(next);
+    void write('libraryEntries', next).catch((error) => setError(message(error)));
+  }
+  function saveNote(id: string, value: string) {
+    const next = { ...notes };
+    if (value.trim()) next[id] = value.trim();
+    else delete next[id];
+    setNotes(next);
+    void write('chapterNotes', next).catch((error) => setError(message(error)));
   }
   function closeChapter() {
     saveProgress();
@@ -683,6 +902,7 @@ function Main() {
     const next = index >= 0 ? availableChapters[index + 1] : undefined;
     return (
       <ChapterReader
+        key={chapter.id}
         chapter={chapter}
         novel={detail?.novel.title || ''}
         settings={settings}
@@ -694,6 +914,8 @@ function Main() {
         bookmarked={bookmarks.includes(chapter.id)}
         saved={savedIds.includes(chapter.id)}
         downloadDisabled={!!queueProgress || !!removingNovelId}
+        note={notes[chapter.id] || ''}
+        onSaveNote={(value) => saveNote(chapter.id, value)}
         onControls={setReaderControls}
         onBack={closeChapter}
         onContents={() => {
@@ -717,6 +939,7 @@ function Main() {
         onNext={next && (() => void openChapter(next))}
         onProgress={(percent, y) => {
           offset.current = y;
+          lastPercent.current = percent;
           setReadingPercent(percent);
         }}
         onSavePosition={saveProgress}
@@ -787,7 +1010,7 @@ function Main() {
       <StatusBar style="light" />
       {rangePicker && !!detail?.chapters.length && (
         <DownloadRange
-          chapters={detail.chapters}
+          chapters={detail.chapters.filter((item) => !item.locked)}
           savedIds={savedIds}
           currentId={progress[detail.novel.id]?.chapterId}
           close={() => setRangePicker(false)}
@@ -881,10 +1104,7 @@ function Main() {
                 label={progress[detail.novel.id] ? 'Continue reading' : 'Start reading'}
                 disabled={!availableChapters.length || !!chapterLoading}
                 onPress={() => {
-                  const chosen =
-                    availableChapters.find(
-                      (item) => item.id === progress[detail.novel.id]?.chapterId,
-                    ) || availableChapters[0];
+                  const chosen = resumeChapter(availableChapters, progress[detail.novel.id]);
                   if (chosen) void openChapter(chosen);
                 }}
               />
@@ -892,7 +1112,11 @@ function Main() {
                 <NovelAction
                   icon="download-outline"
                   label="Download range"
-                  disabled={!detail.chapters.length || !!queueProgress || !!removingNovelId}
+                  disabled={
+                    !detail.chapters.some((item) => !item.locked) ||
+                    !!queueProgress ||
+                    !!removingNovelId
+                  }
                   onPress={() => setRangePicker(true)}
                 />
               )}
@@ -929,6 +1153,7 @@ function Main() {
                   ['About', 'information-circle-outline'],
                   ['Characters', 'people-outline'],
                   ['Community', 'chatbubbles-outline'],
+                  ['Notes', 'document-text-outline'],
                 ] as const
               ).map(([label, icon]) => (
                 <Pressable
@@ -947,22 +1172,49 @@ function Main() {
                 </Pressable>
               ))}
             </View>
-            {detailTab === 'About' && (
+            {detailTab === 'Notes' && (
               <View style={s.panel}>
-                <Text style={s.heading}>Synopsis</Text>
-                <Text style={s.body}>
-                  {detail.novel.description || 'A synopsis is unavailable for this story.'}
-                </Text>
-                {!!detail.novel.genres.length && (
-                  <View style={s.row}>
-                    {detail.novel.genres.map((genre) => (
-                      <Text style={s.genreTag} key={genre}>
-                        {genre}
-                      </Text>
-                    ))}
-                  </View>
+                <Text style={s.heading}>Notes and bookmarks</Text>
+                {detail.chapters
+                  .filter((item) => notes[item.id] || bookmarks.includes(item.id))
+                  .map((item) => (
+                    <Pressable
+                      key={item.id}
+                      accessibilityRole="button"
+                      onPress={() => void openChapter(item)}
+                    >
+                      <Text style={s.link}>{item.title}</Text>
+                      <Text style={s.body}>{notes[item.id] || 'Bookmarked chapter'}</Text>
+                    </Pressable>
+                  ))}
+                {!detail.chapters.some((item) => notes[item.id] || bookmarks.includes(item.id)) && (
+                  <Text style={s.body}>Add a note or bookmark while reading to find it here.</Text>
                 )}
               </View>
+            )}
+            {detailTab === 'About' && (
+              <>
+                <LibraryActions
+                  entry={libraryEntries[libraryKey(detail.novel)] || {}}
+                  inferredShelf={position ? 'Reading' : 'Want to read'}
+                  onChange={(entry) => updateLibraryEntry(detail.novel, entry)}
+                />
+                <View style={s.panel}>
+                  <Text style={s.heading}>Synopsis</Text>
+                  <Text style={s.body}>
+                    {detail.novel.description || 'A synopsis is unavailable for this story.'}
+                  </Text>
+                  {!!detail.novel.genres.length && (
+                    <View style={s.row}>
+                      {detail.novel.genres.map((genre) => (
+                        <Text style={s.genreTag} key={genre}>
+                          {genre}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              </>
             )}
             {detailTab === 'Characters' && (
               <Characters
@@ -998,6 +1250,11 @@ function Main() {
                     </Pressable>
                   )}
                 </View>
+                {waitingForIndex && tab !== 'Downloads' && (
+                  <View style={s.panel}>
+                    <Text style={s.body}>Waiting for background chapter indexing.</Text>
+                  </View>
+                )}
                 {tab !== 'Downloads' &&
                   detail.job &&
                   ['queued', 'running', 'failed'].includes(detail.job.status) && (
@@ -1052,7 +1309,11 @@ function Main() {
                     <View key={chapter.id} style={[s.chapterRow, current && s.currentChapterRow]}>
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel={`Read ${chapter.title}`}
+                        accessibilityLabel={
+                          chapter.locked
+                            ? `Open ${chapter.title} on Webnovel`
+                            : `Read ${chapter.title}`
+                        }
                         disabled={!!chapterLoading}
                         onPress={() => void openChapter(chapter)}
                         style={s.chapterLink}
@@ -1062,11 +1323,17 @@ function Main() {
                           <Text style={s.body} numberOfLines={2}>
                             {chapter.title}
                           </Text>
-                          {current && <Text style={s.small}>Last read</Text>}
+                          {chapter.locked ? (
+                            <Text style={s.small}>Read on Webnovel</Text>
+                          ) : (
+                            current && <Text style={s.small}>Last read</Text>
+                          )}
                         </View>
                         {marked && <Ionicons name="bookmark" size={16} color="#60b5ff" />}
                       </Pressable>
-                      {saved ? (
+                      {chapter.locked ? (
+                        <Ionicons name="lock-closed-outline" size={17} color="#60b5ff" />
+                      ) : saved ? (
                         <View accessibilityLabel="Available offline" style={s.detailIconButton}>
                           <Ionicons name="checkmark-circle" size={20} color="#60b5ff" />
                         </View>
@@ -1125,28 +1392,72 @@ function Main() {
               style={{ marginBottom: 20 }}
             >
               <View style={[s.row, { flexWrap: 'nowrap', gap: 8 }]}>
-                {['All', 'Fantasy', 'Adventure', 'Slice of life'].map((item) => (
-                  <Pressable
+                <FilterChip label="All genres" selected={!genre} onPress={() => setGenre('')} />
+                {genres.map((item) => (
+                  <FilterChip
                     key={item}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Genre ${item}`}
-                    onPress={() => setGenre(item)}
-                    style={[s.genreChip, genre === item && s.genreActive]}
-                  >
-                    <Text
-                      style={{
-                        color: genre === item ? '#74bcff' : '#8591a5',
-                        fontSize: 12,
-                        fontWeight: '600',
-                      }}
-                    >
-                      {item === 'All' ? 'For you' : item}
-                    </Text>
-                  </Pressable>
+                    label={item}
+                    selected={genre === item}
+                    onPress={() => setGenre(genre === item ? '' : item)}
+                  />
                 ))}
               </View>
             </ScrollView>
-            {!query && genre === 'All' && featured && (
+            <View style={[s.row, { gap: 8, marginBottom: 14 }]}>
+              <FilterChip
+                label="Completed"
+                selected={completed}
+                onPress={() => setCompleted(!completed)}
+              />
+              <FilterChip
+                label="Reddit picks"
+                selected={redditOnly}
+                onPress={() => setRedditOnly(!redditOnly)}
+              />
+              <FilterChip
+                label="Webnovel"
+                selected={webnovelOnly}
+                onPress={() => setWebnovelOnly(!webnovelOnly)}
+              />
+            </View>
+            <View style={[s.row, { gap: 8, marginBottom: 20 }]}>
+              <Text style={s.small}>Sort by</Text>
+              {sortOptions.map(([value, label]) => (
+                <FilterChip
+                  key={value}
+                  label={label}
+                  selected={sort === value}
+                  onPress={() => setSort(value)}
+                />
+              ))}
+            </View>
+            {webnovelOnly && (
+              <View style={s.panel}>
+                <TextInput
+                  value={webnovelLink}
+                  onChangeText={setWebnovelLink}
+                  placeholder="Paste a Webnovel book link"
+                  placeholderTextColor="#777e89"
+                  accessibilityLabel="Webnovel book link"
+                  autoCapitalize="none"
+                  keyboardType="url"
+                  style={s.input}
+                />
+                <Button
+                  label={addingBook ? 'Adding book…' : 'Add Webnovel book'}
+                  secondary
+                  disabled={addingBook || !webnovelLink.trim()}
+                  onPress={() => void addWebnovel()}
+                />
+              </View>
+            )}
+            {redditOnly && !query.trim() && !genre && !completed && !webnovelOnly && (
+              <DiscussionPanel
+                threads={feed.redditThreads || []}
+                title="Reddit recommendation threads"
+              />
+            )}
+            {homeCatalog && featured && (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Read featured novel ${featured.title}`}
@@ -1186,9 +1497,10 @@ function Main() {
                 </View>
               </Pressable>
             )}
-            {!query && genre === 'All' && (
+            {homeCatalog && (
               <DiscoveryShelves
                 feed={feed}
+                personalized={!!readingGenres}
                 onOpen={(n) => void openNovel(n)}
                 renderCover={(n) => <Cover novel={n} />}
               />
@@ -1196,37 +1508,72 @@ function Main() {
             <View
               style={[s.row, { justifyContent: 'space-between', marginTop: 4, marginBottom: 12 }]}
             >
-              <Text style={s.heading}>{query ? 'Search results' : 'Explore the collection'}</Text>
-              <Pressable accessibilityLabel="Refresh novels" onPress={() => void loadNovels(1)}>
+              <Text style={s.heading}>
+                {query.trim() ? 'Search results' : genre || 'Browse novels'}
+              </Text>
+              <Pressable
+                accessibilityLabel="Refresh novels"
+                onPress={() => {
+                  void loadNovels(1);
+                  void loadFeed();
+                }}
+              >
                 <Ionicons name="refresh-outline" size={18} color="#168bff" />
               </Pressable>
             </View>
 
-            <Text style={[s.small, { marginBottom: 14 }]}>
-              {total} {total === 1 ? 'story' : 'stories'} to explore
-            </Text>
-            <View style={s.grid}>
-              {novels.map((n) => (
-                <Pressable key={n.id} style={s.bookCard} onPress={() => void openNovel(n)}>
-                  <Cover novel={n} />
-                  <Text style={s.bookTitle} numberOfLines={2}>
-                    {n.title}
-                  </Text>
-                  <Text style={s.small}>
-                    {n.genres[0] || (n.chapterCount ? `${n.chapterCount} chapters` : 'Light novel')}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-            {!novels.length && !busy && (
-              <Text style={s.muted}>No stories found. Try another title or genre.</Text>
-            )}
-            {hasMore && (
-              <Button
-                label="Load more stories"
-                secondary
-                onPress={() => void loadNovels(page + 1)}
-              />
+            {!!catalogError && <Text style={s.body}>{catalogError}</Text>}
+            {catalogBusy && <ActivityIndicator color="#168bff" style={{ margin: 10 }} />}
+            {loadedCatalog === catalogKey && (
+              <>
+                <Text style={[s.small, { marginBottom: 14 }]}>
+                  {total} {total === 1 ? 'novel' : 'novels'}
+                </Text>
+                {novels.map((n) => {
+                  const count = Math.max(n.chapterCount, n.reportedChapterCount ?? 0);
+                  const metadata = [
+                    n.genres[0],
+                    n.status === 'completed'
+                      ? 'Completed'
+                      : n.status === 'ongoing'
+                        ? 'Ongoing'
+                        : '',
+                    count ? `${count.toLocaleString()} chapters` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    <Pressable
+                      key={n.id}
+                      accessibilityRole="button"
+                      style={s.libraryRow}
+                      onPress={() => void openNovel(n)}
+                    >
+                      <View style={{ width: 56 }}>
+                        <Cover novel={n} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.bookTitle} numberOfLines={2}>
+                          {n.title}
+                        </Text>
+                        {!!metadata && <Text style={s.small}>{metadata}</Text>}
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color="#168bff" />
+                    </Pressable>
+                  );
+                })}
+                {!novels.length && !catalogBusy && !catalogError && (
+                  <Text style={s.muted}>No novels match these filters.</Text>
+                )}
+                {hasMore && (
+                  <Button
+                    label="Load more novels"
+                    secondary
+                    disabled={catalogBusy}
+                    onPress={() => void loadNovels(page + 1)}
+                  />
+                )}
+              </>
             )}
             <Pressable onPress={() => setTab('Downloads')} style={s.offlineBanner}>
               <View style={s.offlineIcon}>
@@ -1242,30 +1589,15 @@ function Main() {
             </Pressable>
           </>
         ) : tab === 'Library' ? (
-          <>
-            <Text style={s.section}>A COLLECTION OF YOUR OWN</Text>
-            <Text style={s.hero}>Your library.</Text>
-            <Text style={s.muted}>Every story you open finds a home here.</Text>
-            {library.map((n) => (
-              <Pressable key={n.id} onPress={() => void openNovel(n)} style={s.libraryRow}>
-                <View style={{ width: 90 }}>
-                  <Cover novel={n} />
-                </View>
-                <View style={{ flex: 1, gap: 8 }}>
-                  <Text style={s.heading}>{n.title}</Text>
-                  <Text style={s.small}>
-                    {progress[n.id]
-                      ? `Continue · ${progress[n.id].title}`
-                      : 'Ready for the first chapter'}
-                  </Text>
-                  <Text style={s.gold}>{downloads[n.id]?.length || 0} saved offline →</Text>
-                </View>
-              </Pressable>
-            ))}
-            {!library.length && (
-              <Text style={s.body}>Open a story in Discover to add it to your library.</Text>
-            )}
-          </>
+          <LibraryBrowser
+            novels={library}
+            entries={libraryEntries}
+            progress={progress}
+            downloads={downloads}
+            onOpen={(novel) => void openNovel(novel)}
+            onResume={(novel) => void openNovel(novel, true)}
+            cover={(novel) => <Cover novel={novel} />}
+          />
         ) : tab === 'Downloads' ? (
           <>
             <Text style={s.section}>TAKE YOUR STORIES WITH YOU</Text>
@@ -1355,7 +1687,7 @@ function Main() {
         <Text style={s.footer}>ANOTHER WORLD IS ONE CHAPTER AWAY</Text>
       </ScrollView>
       {!detail && continuing && (
-        <Pressable style={s.continueDock} onPress={() => void openNovel(continuing)}>
+        <Pressable style={s.continueDock} onPress={() => void openNovel(continuing, true)}>
           <Ionicons name="book-outline" size={22} color="#168bff" />
           <View style={{ flex: 1 }}>
             <Text style={s.dockEyebrow}>CONTINUE READING</Text>

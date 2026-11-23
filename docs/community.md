@@ -39,7 +39,7 @@ Backend configuration:
 
 ```dotenv
 REDDIT_RSS_ENABLED=true
-REDDIT_SUBREDDITS=noveltranslations,LightNovels,ProgressionFantasy
+REDDIT_SUBREDDITS=noveltranslations,LightNovels,ProgressionFantasy,Webnovel
 ```
 
 Administration endpoints:

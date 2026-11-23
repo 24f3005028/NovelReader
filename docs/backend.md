@@ -2,7 +2,11 @@
 
 The backend stores a shared novel catalogue, chapter index records, cached chapter bodies, import jobs, chapter failures, and catalogue page checkpoints in SQLite. Source adapters are separated into `source-registry.ts`, `transport.ts`, `parsers.ts`, and `sources.ts`.
 
-## The default on-demand workflow
+## Background chapter lists and on-demand reading
+
+The worker backfills chapter lists for enabled sources in the existing catalogue and picks up newly discovered novels automatically. It resumes interrupted jobs after a restart, rotates through sources, and can revisit failed indexes or refresh titles when the catalogue advertises more chapters. Set `AUTO_INDEX_CHAPTERS=false` to disable automatic backfill and refresh.
+
+Paste a book URL to add a specific title and queue its chapter list immediately.
 
 ```http
 POST /imports
@@ -17,13 +21,16 @@ Returns `{ novel, job }` with a persistent `index` job. The worker follows chapt
 GET /novels/NOVEL_ID
 ```
 
-Returns `{ novel, chapters, job }`. A chapter's `downloaded` field means its body is cached **on the backend**; device-local download status is managed separately by the mobile app.
+Returns `{ novel, chapters, job, chapterIndexPending }`. A chapter's `downloaded` field means its body is cached **on the backend**; device-local download status is managed separately by the mobile app. Webnovel chapters marked `locked` open on Webnovel.
 
 ```http
-POST /chapters/CHAPTER_ID/import
+POST /novels/NOVEL_ID/chapter-batches
+Content-Type: application/json
+
+{"chapterId":"CHAPTER_ID","prioritize":true}
 ```
 
-Returns `{ chapter, job: null }` immediately if cached, or HTTP 202 with `{ chapter: null, job }`. Duplicate requests share the existing active chapter job. Single-chapter jobs have their own worker lane, so they can run while a long novel index is still being fetched.
+Queues up to 100 chapter bodies by reading order, aligned to the block containing the requested chapter. It skips cached or locked chapters. Returns the requested chapter immediately if cached, or HTTP 202 with its job. The reader starts as soon as that chapter is ready. Repeated calls share queued jobs, and `prioritize` moves the requested chapter ahead of background work. The content queue runs separately from chapter-list indexing.
 
 ```http
 GET /jobs/JOB_ID
@@ -50,6 +57,7 @@ Source chapter numbers can contain gaps, repeated numbered parts, prologues, and
 ```http
 POST /catalog/freewebnovel-net/start
 POST /catalog/readnovelfull/start
+POST /catalog/webnovel/start
 GET /catalog
 POST /catalog/freewebnovel-net/cancel
 ```
@@ -57,6 +65,8 @@ POST /catalog/freewebnovel-net/cancel
 Every completed page has a fingerprint, record count, and timestamp. Starting a failed/cancelled crawl resumes the pending page; starting a completed crawl begins a refresh. A repeated page fingerprint at a different page number fails with a pagination diagnostic. Existing novel records do not prematurely end a refresh.
 
 The default routes are FreeWebNovel.net `/most-popular?page=N` and ReadNovelFull `/novel-list/most-popular-novel?page=N`. FreeWebNovel.net chapter indexes expose page counts and ordinary server-rendered `?page=N` navigation. ReadNovelFull initially shows only a small chapter sample; its public JavaScript uses `/ajax/chapter-archive?novelId=ID`, which robots.txt explicitly allows. The adapter reads the novel ID from the page and uses that same public archive.
+
+Webnovel indexes its featured and genre pages under `/stories/novel`. Genre pages may list the same titles. The public `/book/BOOK_ID/catalog` archive supplies chapter metadata.
 
 ## Other endpoints
 
@@ -66,6 +76,7 @@ The default routes are FreeWebNovel.net `/most-popular?page=N` and ReadNovelFull
 | GET    | `/sources`                               | Source names, enabled flags, notes                               |
 | POST   | `/sources/:source/probe`                 | Live catalogue diagnostic: record/cover counts and access errors |
 | GET    | `/novels?q=&genre=&source=&page=1`       | Search stored novel metadata, 30 per page                        |
+| GET    | `/genres`                                | Genre names available in the catalogue                           |
 | POST   | `/novels`                                | Add metadata using `{ source, url, title }`                      |
 | POST   | `/sources/:source/sync`                  | Fetch a single catalogue page using `{ page }`                   |
 | GET    | `/jobs/:id/failures`                     | Failed chapter IDs and errors                                    |
@@ -73,6 +84,8 @@ The default routes are FreeWebNovel.net `/most-popular?page=N` and ReadNovelFull
 | GET    | `/novels/:id/download?offset=0&limit=20` | Batch of stored bodies and pending chapter IDs; limit up to 50   |
 
 All content and mutation routes use a bearer token if `API_TOKEN` is configured. `/health` remains public. This is a personal-reader API; add per-user authentication and ownership before running a multi-user service.
+
+`/novels` also accepts `completed=true`, `reddit=true`, and `sort=chapters` or `sort=title`. Sorting applies across the matching catalogue before pagination.
 
 ## Adding a source
 

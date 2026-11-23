@@ -1,7 +1,13 @@
 import { load } from 'cheerio';
 import type { Novel, Chapter } from '@novelreader/shared';
 import { html, SourceError } from './transport.js';
-import { catalogUrl, safeUrl, type LiveSource } from './source-registry.js';
+import {
+  catalogUrl,
+  safeUrl,
+  webnovelBookId,
+  webnovelBrowsePaths,
+  type LiveSource,
+} from './source-registry.js';
 import { parseCatalog, parseNovel, nextCatalogPage } from './parsers.js';
 export { html, SourceError } from './transport.js';
 export {
@@ -19,20 +25,36 @@ export async function browse(source: LiveSource, page: number) {
   const body = await html(source, url);
   const items = parseCatalog(source, body, url).map((n, i) => ({
     ...n,
-    popularityRank: (page - 1) * (source === 'readnovelfull' ? 20 : 22) + i + 1,
+    ...(source !== 'webnovel'
+      ? { popularityRank: (page - 1) * (source === 'readnovelfull' ? 20 : 22) + i + 1 }
+      : {}),
   }));
   if (!items.length)
     throw new SourceError(
       'No novel metadata found. The source layout may have changed.',
       'CATALOG_EMPTY',
     );
-  return { items, hasNext: nextCatalogPage(source, body, page, url) !== null };
+  return {
+    items,
+    hasNext:
+      source === 'webnovel'
+        ? page < webnovelBrowsePaths.length
+        : nextCatalogPage(source, body, page, url) !== null,
+  };
 }
 export async function chapterIndex(
   novel: Novel,
   onPage?: (novel: Novel, chapters: Chapter[]) => void | Promise<void>,
   shouldCancel?: () => boolean,
 ) {
+  if (novel.source === 'webnovel') {
+    const archive = await html('webnovel', `/book/${webnovelBookId(novel.url)}/catalog`);
+    if (shouldCancel?.()) throw new SourceError('Import cancelled', 'CANCELLED');
+    const parsed = parseNovel(novel, archive);
+    if (!parsed.chapters.length || parsed.chapters.length < parsed.novel.chapterCount)
+      throw new SourceError('Webnovel returned an incomplete chapter list', 'INCOMPLETE_INDEX');
+    return parsed;
+  }
   const pending = [novel.url],
     seen = new Set<string>(),
     chapters = new Map<string, Chapter>();

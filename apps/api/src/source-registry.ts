@@ -6,6 +6,7 @@ export const sourceIds = [
   'empirenovel',
   'freewebnovel-net',
   'readnovelfull',
+  'webnovel',
 ] as const;
 export const registry: Record<
   LiveSource,
@@ -39,17 +40,60 @@ export const registry: Record<
     catalog: '/novel-list/most-popular-novel',
     note: 'Live catalogue HTML; chapter archive endpoint supported.',
   },
+  webnovel: {
+    name: 'Webnovel',
+    host: 'www.webnovel.com',
+    aliases: ['webnovel.com'],
+    catalog: '/stories/novel',
+    note: 'Public chapter index. Locked chapters open on Webnovel.',
+  },
 };
 export const stableId = (value: string) =>
   createHash('sha256').update(value).digest('hex').slice(0, 24);
+export const webnovelBrowsePaths = [
+  '/stories/novel',
+  ...[
+    'fantasy-male',
+    'fantasy-female',
+    'action-male',
+    'eastern-male',
+    'games-male',
+    'scifi-male',
+    'scifi-female',
+    'horror-male',
+    'history-male',
+    'history-female',
+    'urban-male',
+    'urban-female',
+    'sports-male',
+    'war-male',
+    'realistic-male',
+    'acg-male',
+    'teen-female',
+    'lgbt-female',
+    'general-female',
+  ].map((genre) => `/stories/novel-${genre}`),
+];
 export function enabled(source: SourceId) {
   return (
     source === 'demo' ||
-    (process.env.ENABLED_SOURCES || 'demo,freewebnovel-net,readnovelfull')
+    (process.env.ENABLED_SOURCES || 'demo,freewebnovel-net,readnovelfull,webnovel')
       .split(',')
       .map((s) => s.trim())
       .includes(source)
   );
+}
+export function webnovelBookUrl(value: string) {
+  const url = new URL(safeUrl('webnovel', value));
+  if (!/^\/book\/(?:[^/]+_)?\d+\/?$/.test(url.pathname))
+    throw new Error('Use a Webnovel book page URL');
+  return `https://www.webnovel.com${url.pathname.replace(/\/$/, '')}`;
+}
+export function webnovelBookId(url: string) {
+  return new URL(url).pathname.match(/(\d+)\/?$/)?.[1];
+}
+export function novelId(source: LiveSource, url: string) {
+  return stableId(source === 'webnovel' ? `webnovel:${webnovelBookId(url)}` : url);
 }
 export function safeUrl(source: SourceId, value: string) {
   if (source === 'demo') throw new Error('Demo does not accept URLs');
@@ -94,5 +138,10 @@ export function sources(): Source[] {
 }
 export function catalogUrl(source: LiveSource, page: number) {
   const config = registry[source];
+  if (source === 'webnovel') {
+    const path = webnovelBrowsePaths[page - 1];
+    if (!path) throw new Error('Webnovel browse page is out of range');
+    return `https://${config.host}${path}`;
+  }
   return `https://${config.host}${config.catalog}${page === 1 ? '' : source === 'freewebnovel' ? `/${page}` : `?page=${page}`}`;
 }

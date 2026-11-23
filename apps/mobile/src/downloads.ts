@@ -129,7 +129,8 @@ async function processQueue(queue: Queue) {
       const id = queue.ids[cursor];
       publish({ progress: `${savedCount} of ${queue.ids.length} chapters saved` });
       try {
-        const content = (await localChapter(id)) || (await fetchChapterOnDemand(id, () => paused));
+        const content =
+          (await localChapter(id)) || (await fetchChapterOnDemand(queue.novelId, id, () => paused));
         if (paused) break;
         await updateSaved(async () => {
           await saveChapter(content);

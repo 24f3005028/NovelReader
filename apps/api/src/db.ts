@@ -1,8 +1,8 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Novel, Chapter, ImportJob } from '@novelreader/shared';
-import { normalizeNovelTitle, sourceChapterNumber } from '@novelreader/shared';
+import type { CatalogSort, Novel, Chapter, ImportJob, NovelStatus } from '@novelreader/shared';
+import { chapterBatchSize, normalizeNovelTitle, sourceChapterNumber } from '@novelreader/shared';
 
 export function openDatabase(path = process.env.DATABASE_PATH || './data/novelreader.db') {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -21,6 +21,8 @@ export function migrateDatabase(db: DatabaseSync) {
   if (!columns.includes('mode'))
     db.exec("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'all'");
   if (!columns.includes('chapter_id')) db.exec('ALTER TABLE jobs ADD COLUMN chapter_id TEXT');
+  if (!columns.includes('priority'))
+    db.exec('ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
   db.exec(
     "DROP INDEX IF EXISTS active_job; CREATE UNIQUE INDEX IF NOT EXISTS active_novel_job ON jobs(novel_id) WHERE status IN ('queued','running') AND chapter_id IS NULL; CREATE UNIQUE INDEX IF NOT EXISTS active_chapter_job ON jobs(chapter_id) WHERE status IN ('queued','running') AND chapter_id IS NOT NULL;",
   );
@@ -91,6 +93,12 @@ export function migrateDatabase(db: DatabaseSync) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS chapter_failures(job_id TEXT NOT NULL,chapter_id TEXT PRIMARY KEY,error TEXT NOT NULL,updated_at INTEGER NOT NULL)',
   );
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS novel_index_history ON jobs(novel_id,created_at) WHERE chapter_id IS NULL',
+  );
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS chapter_job_history ON jobs(chapter_id) WHERE chapter_id IS NOT NULL',
+  );
   return db;
 }
 export class Store {
@@ -122,7 +130,28 @@ export class Store {
       .all()
       .map((r) => JSON.parse(String(r.data)));
   }
-  search(q: string, source: string, genre: string, page: number) {
+  genres(): string[] {
+    return this.db
+      .prepare(
+        `SELECT MIN(TRIM(genre.value)) AS name
+        FROM novels, json_each(novels.data,'$.genres') AS genre
+        WHERE TRIM(genre.value)<>''
+        GROUP BY LOWER(TRIM(genre.value)) ORDER BY name COLLATE NOCASE`,
+      )
+      .all()
+      .map((row) => String(row.name));
+  }
+  search(
+    q: string,
+    source: string,
+    genre: string,
+    page: number,
+    options: {
+      sort?: CatalogSort;
+      completed?: boolean;
+      reddit?: boolean;
+    } = {},
+  ) {
     const filters: string[] = [],
       params: SQLInputValue[] = [];
     if (q) {
@@ -136,22 +165,52 @@ export class Store {
       params.push(source);
     }
     if (genre) {
-      filters.push("EXISTS (SELECT 1 FROM json_each(novels.data,'$.genres') WHERE lower(value)=?)");
+      filters.push(
+        "EXISTS (SELECT 1 FROM json_each(novels.data,'$.genres') WHERE lower(trim(value))=?)",
+      );
       params.push(genre.toLowerCase());
     }
+    if (options.reddit) {
+      filters.push(
+        "EXISTS (SELECT 1 FROM reddit_mentions WHERE novel_key=json_extract(novels.data,'$.catalogKey'))",
+      );
+    }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-    const grouped = `WITH ranked AS (SELECT data,rowid AS position,ROW_NUMBER() OVER(PARTITION BY json_extract(data,'$.catalogKey') ORDER BY CASE WHEN EXISTS(SELECT 1 FROM chapters WHERE chapters.novel_id=novels.id AND body IS NOT NULL) THEN 0 ELSE 1 END,CASE json_extract(data,'$.source') WHEN 'demo' THEN 0 WHEN 'readnovelfull' THEN 1 WHEN 'freewebnovel-net' THEN 2 ELSE 3 END,CASE WHEN json_extract(data,'$.cover')<>'' THEN 0 ELSE 1 END,rowid) AS duplicateRank FROM novels ${where})`;
+    const grouped = `WITH ranked AS (
+      SELECT data, rowid AS position,
+        MAX(MAX(COALESCE(json_extract(data,'$.chapterCount'),0),
+                COALESCE(json_extract(data,'$.reportedChapterCount'),0))) OVER title AS chapters,
+        MAX(CASE WHEN json_extract(data,'$.status')='completed' OR json_extract(data,'$.source')='demo'
+                 THEN 1 ELSE 0 END) OVER title AS completed,
+        ROW_NUMBER() OVER (title ORDER BY
+          CASE WHEN EXISTS(SELECT 1 FROM chapters WHERE chapters.novel_id=novels.id AND body IS NOT NULL) THEN 0 ELSE 1 END,
+          CASE json_extract(data,'$.source') WHEN 'demo' THEN 0 WHEN 'readnovelfull' THEN 1 WHEN 'freewebnovel-net' THEN 2 WHEN 'webnovel' THEN 4 ELSE 3 END,
+          CASE WHEN json_extract(data,'$.cover')<>'' THEN 0 ELSE 1 END, rowid) AS duplicateRank
+      FROM novels ${where}
+      WINDOW title AS (PARTITION BY json_extract(data,'$.catalogKey'))
+    )`;
+    const include = `duplicateRank=1${options.completed ? ' AND completed=1' : ''}`;
+    const order =
+      options.sort === 'chapters'
+        ? 'chapters DESC, position DESC'
+        : options.sort === 'title'
+          ? "json_extract(data,'$.title') COLLATE NOCASE, position DESC"
+          : 'position DESC';
     const total = Number(
       this.db
-        .prepare(`${grouped} SELECT COUNT(*) AS total FROM ranked WHERE duplicateRank=1`)
+        .prepare(`${grouped} SELECT COUNT(*) AS total FROM ranked WHERE ${include}`)
         .get(...params)!.total,
     );
     const items = this.db
       .prepare(
-        `${grouped} SELECT data FROM ranked WHERE duplicateRank=1 ORDER BY position DESC LIMIT 30 OFFSET ?`,
+        `${grouped} SELECT data,chapters,completed FROM ranked WHERE ${include} ORDER BY ${order} LIMIT 30 OFFSET ?`,
       )
       .all(...params, (page - 1) * 30)
-      .map((r) => JSON.parse(String(r.data)) as Novel);
+      .map((r) => {
+        const novel = JSON.parse(String(r.data)) as Novel;
+        const status: NovelStatus | undefined = r.completed ? 'completed' : novel.status;
+        return { ...novel, status, reportedChapterCount: Number(r.chapters) || undefined };
+      });
     return { items, total, page, hasMore: page * 30 < total };
   }
   stats() {
@@ -225,6 +284,28 @@ export class Store {
       .get(novelId);
     return r ? this.job(String(r.id)) : null;
   }
+  nextUnindexedNovel(source: Novel['source']) {
+    const row = this.db
+      .prepare(
+        `
+      SELECT novels.id FROM novels
+      LEFT JOIN jobs AS prior ON prior.id=(
+        SELECT id FROM jobs WHERE novel_id=novels.id AND chapter_id IS NULL
+        ORDER BY created_at DESC,rowid DESC LIMIT 1
+      )
+      WHERE json_extract(data,'$.source')=?
+        AND (prior.id IS NULL OR (
+          prior.created_at < ? AND (prior.status='failed' OR (
+            prior.status='completed' AND prior.mode='index'
+            AND COALESCE(json_extract(data,'$.reportedChapterCount'),0)>prior.total
+          ))
+        ))
+      ORDER BY prior.id IS NOT NULL,novels.rowid LIMIT 1
+    `,
+      )
+      .get(source, Date.now() - 24 * 60 * 60 * 1000);
+    return row ? String(row.id) : undefined;
+  }
   enqueue(
     novelId: string,
     mode: ImportJob['mode'] = 'index',
@@ -251,6 +332,34 @@ export class Store {
       )
       .run(id, novelId, Date.now(), mode, chapterId);
     return this.job(id)!;
+  }
+  enqueueChapterBatch(novelId: string, chapterId: string, prioritize: boolean) {
+    const chapters = this.chapters(novelId);
+    const position = chapters.findIndex((chapter) => chapter.id === chapterId);
+    if (position < 0 || chapters[position].locked) return null;
+    const start = Math.floor(position / chapterBatchSize) * chapterBatchSize;
+    const batch = chapters.slice(start, start + chapterBatchSize);
+    this.db.exec('BEGIN');
+    try {
+      const target = chapters[position];
+      const job = target.downloaded ? null : this.enqueue(novelId, 'chapter', target.id);
+      if (job && prioritize)
+        this.db.prepare('UPDATE jobs SET priority=? WHERE id=?').run(Date.now(), job.id);
+      const attempted = this.db.prepare('SELECT 1 FROM jobs WHERE chapter_id=? LIMIT 1');
+      for (const chapter of batch)
+        if (
+          chapter.id !== chapterId &&
+          !chapter.downloaded &&
+          !chapter.locked &&
+          !attempted.get(chapter.id)
+        )
+          this.enqueue(novelId, 'chapter', chapter.id);
+      this.db.exec('COMMIT');
+      return { chapter: target.downloaded ? this.chapter(target.id) : null, job };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   updateJob(
     id: string,

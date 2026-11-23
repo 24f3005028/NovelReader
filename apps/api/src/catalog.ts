@@ -1,7 +1,37 @@
 import { Store } from './db.js';
-import { browse, stableId, SourceError } from './sources.js';
-import type { SourceId } from '@novelreader/shared';
+import { browse, enabled, stableId, SourceError } from './sources.js';
+import type { Novel, SourceId } from '@novelreader/shared';
 import type { LiveSource } from './source-registry.js';
+
+export function saveCatalogNovel(store: Store, novel: Novel) {
+  const existing = store.novel(novel.id);
+  store.saveNovel(
+    existing
+      ? {
+          ...existing,
+          url: novel.url,
+          title: novel.title,
+          cover: novel.cover || existing.cover,
+          description: existing.description || novel.description,
+          author: novel.author === 'Unknown' ? existing.author : novel.author,
+          genres:
+            existing.genres.length && novel.source === 'webnovel'
+              ? existing.genres
+              : novel.genres.length
+                ? novel.genres
+                : existing.genres,
+          status: novel.status ?? existing.status,
+          reportedChapterCount:
+            Math.max(existing.reportedChapterCount || 0, novel.chapterCount) || undefined,
+          popularityRank:
+            existing.popularityRank && novel.popularityRank
+              ? Math.min(existing.popularityRank, novel.popularityRank)
+              : (existing.popularityRank ?? novel.popularityRank),
+          communityRating: novel.communityRating || existing.communityRating,
+        }
+      : novel,
+  );
+}
 export class CatalogCrawler {
   private busy = new Set<string>();
   constructor(private store: Store) {
@@ -41,7 +71,10 @@ export class CatalogCrawler {
   }
   async tick() {
     const runs = this.all().filter(
-      (r) => ['queued', 'running'].includes(String(r.status)) && !this.busy.has(String(r.source)),
+      (r) =>
+        ['queued', 'running'].includes(String(r.status)) &&
+        enabled(String(r.source) as LiveSource) &&
+        !this.busy.has(String(r.source)),
     );
     await Promise.all(
       runs.map((run) => this.process(String(run.source) as LiveSource, Number(run.page))),
@@ -61,7 +94,7 @@ export class CatalogCrawler {
       const duplicate = this.store.db
         .prepare('SELECT page FROM catalog_pages WHERE source=? AND fingerprint=? AND page<>?')
         .get(source, fingerprint, page);
-      if (duplicate)
+      if (duplicate && source !== 'webnovel')
         throw new SourceError(
           `Source repeated page ${duplicate.page} at page ${page}. Pagination stopped to prevent an endless crawl.`,
           'CATALOG_PAGINATION_STALLED',
@@ -74,25 +107,8 @@ export class CatalogCrawler {
       this.store.db.exec('BEGIN');
       try {
         for (const n of items) {
-          const existing = this.store.novel(n.id);
-          if (!existing) added++;
-          this.store.saveNovel(
-            existing
-              ? {
-                  ...existing,
-                  title: n.title,
-                  cover: n.cover || existing.cover,
-                  author: n.author === 'Unknown' ? existing.author : n.author,
-                  genres: n.genres.length ? n.genres : existing.genres,
-                  chapterCount: Math.max(existing.chapterCount, n.chapterCount),
-                  popularityRank: Math.min(
-                    existing.popularityRank || Infinity,
-                    n.popularityRank || Infinity,
-                  ),
-                  communityRating: n.communityRating || existing.communityRating,
-                }
-              : n,
-          );
+          if (!this.store.novel(n.id)) added++;
+          saveCatalogNovel(this.store, n);
         }
         this.store.db
           .prepare(

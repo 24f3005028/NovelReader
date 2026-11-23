@@ -4,19 +4,20 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import { z } from 'zod';
 import { timingSafeEqual } from 'node:crypto';
+import { catalogSorts } from '@novelreader/shared';
 import { Store } from './db.js';
 import {
   sources,
   browse,
   enabled,
   safeUrl,
-  stableId,
   sourceIds,
   sourceFromUrl,
   registry,
   SourceError,
 } from './sources.js';
-import { CatalogCrawler } from './catalog.js';
+import { CatalogCrawler, saveCatalogNovel } from './catalog.js';
+import { novelId, webnovelBookUrl } from './source-registry.js';
 import { Community } from './community.js';
 import { RedditSync } from './reddit.js';
 
@@ -163,8 +164,16 @@ export function createApp(store: Store) {
       res.status(403).json({ error: 'Source disabled in backend configuration' });
       return;
     }
-    const url = safeUrl(source, data.url),
-      id = stableId(url);
+    let url = safeUrl(source, data.url);
+    if (source === 'webnovel') {
+      try {
+        url = webnovelBookUrl(url);
+      } catch {
+        res.status(400).json({ error: 'Paste a Webnovel book page URL.' });
+        return;
+      }
+    }
+    const id = novelId(source, url);
     let novel = store.novel(id);
     if (!novel) {
       novel = {
@@ -173,9 +182,9 @@ export function createApp(store: Store) {
         url,
         title:
           data.title ||
-          decodeURIComponent(
-            new URL(url).pathname.split('/').filter(Boolean).pop() || 'Novel',
-          ).replace(/\.html$|[-_]/g, ' '),
+          decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || 'Novel')
+            .replace(source === 'webnovel' ? /_\d+$/ : /\.html$/, '')
+            .replace(/[-_]/g, ' '),
         author: 'Unknown',
         description: '',
         cover: '',
@@ -184,7 +193,10 @@ export function createApp(store: Store) {
       };
       store.saveNovel(novel);
     }
-    res.status(202).json({ novel, job: store.enqueue(id, data.mode) });
+    const prior = source === 'webnovel' && data.mode === 'index' ? store.latestJob(id) : null;
+    res
+      .status(202)
+      .json({ novel, job: prior?.status === 'completed' ? prior : store.enqueue(id, data.mode) });
   });
   app.get('/catalog', (_req, res) => res.json(catalog.all()));
   app.post('/catalog/:source/start', (req, res) => {
@@ -200,6 +212,7 @@ export function createApp(store: Store) {
     catalog.cancel(z.enum(sourceIds).parse(req.params.source));
     res.json(catalog.all());
   });
+  app.get('/genres', (_req, res) => res.json(store.genres()));
   app.get('/novels', (req, res) => {
     const q = z
       .string()
@@ -220,7 +233,11 @@ export function createApp(store: Store) {
       .string()
       .max(80)
       .parse(req.query.genre || '');
-    const result = store.search(q, source, genre, page);
+    const sort = z.enum(catalogSorts).default('default').parse(req.query.sort);
+    const flag = z.enum(['true', 'false']).optional();
+    const completed = flag.parse(req.query.completed) === 'true';
+    const reddit = flag.parse(req.query.reddit) === 'true';
+    const result = store.search(q, source, genre.trim(), page, { sort, completed, reddit });
     res.json({ ...result, items: result.items.map((n) => community.decorate(n)) });
   });
   app.post('/sources/:source/sync', async (req, res) => {
@@ -233,20 +250,7 @@ export function createApp(store: Store) {
       return;
     }
     const { items, hasNext } = await browse(source, page);
-    for (const novel of items) {
-      const existing = store.novel(novel.id);
-      store.saveNovel(
-        existing
-          ? {
-              ...novel,
-              ...existing,
-              cover: novel.cover || existing.cover,
-              popularityRank: novel.popularityRank,
-              communityRating: novel.communityRating || existing.communityRating,
-            }
-          : novel,
-      );
-    }
+    for (const novel of items) saveCatalogNovel(store, novel);
     res.json({ items, page, hasMore: hasNext });
   });
   app.post('/novels', (req, res) => {
@@ -257,8 +261,9 @@ export function createApp(store: Store) {
         title: z.string().min(1).max(300),
       })
       .parse(req.body);
-    const url = safeUrl(data.source, data.url);
-    const id = stableId(url);
+    const url =
+      data.source === 'webnovel' ? webnovelBookUrl(data.url) : safeUrl(data.source, data.url);
+    const id = novelId(data.source, url);
     if (!store.novel(id))
       store.saveNovel({
         id,
@@ -278,10 +283,16 @@ export function createApp(store: Store) {
       res.status(404).json({ error: 'Novel not found' });
       return;
     }
+    const job = store.latestJob(novel.id);
     res.json({
       novel: community.decorate(novel),
       chapters: store.chapters(novel.id),
-      job: store.latestJob(novel.id),
+      job,
+      chapterIndexPending:
+        !job &&
+        novel.source !== 'demo' &&
+        enabled(novel.source) &&
+        process.env.AUTO_INDEX_CHAPTERS !== 'false',
     });
   });
   app.post('/novels/:id/import', (req, res) => {
@@ -298,6 +309,30 @@ export function createApp(store: Store) {
       .object({ mode: z.enum(['index', 'all']).default('index') })
       .parse(req.body || {});
     res.status(202).json(store.enqueue(novel.id, mode));
+  });
+  app.post('/novels/:id/chapter-batches', (req, res) => {
+    const novel = store.novel(req.params.id);
+    const { chapterId, prioritize } = z
+      .object({
+        chapterId: z.string().min(1).max(200),
+        prioritize: z.boolean().default(false),
+      })
+      .parse(req.body);
+    const chapter = store.chapter(chapterId);
+    if (!novel || !chapter || chapter.novelId !== novel.id) {
+      res.status(404).json({ error: 'Chapter not found in this novel.' });
+      return;
+    }
+    if (chapter.locked || !enabled(novel.source)) {
+      res
+        .status(403)
+        .json({
+          error: chapter.locked ? 'Open this locked chapter on Webnovel.' : 'Source is disabled.',
+        });
+      return;
+    }
+    const result = store.enqueueChapterBatch(novel.id, chapterId, prioritize);
+    res.status(result?.job ? 202 : 200).json(result);
   });
   app.get('/jobs/:id', (req, res) => {
     const job = store.job(req.params.id);
@@ -326,6 +361,12 @@ export function createApp(store: Store) {
       res.status(404).json({ error: 'Chapter not found' });
       return;
     }
+    if (chapter.locked) {
+      res
+        .status(403)
+        .json({ error: 'Open this locked chapter on Webnovel.', code: 'CHAPTER_LOCKED' });
+      return;
+    }
     if (!chapter.paragraphs) {
       res.status(409).json({
         error: 'Chapter text has not been fetched yet. Select it to import.',
@@ -339,6 +380,12 @@ export function createApp(store: Store) {
     const chapter = store.chapter(req.params.id);
     if (!chapter) {
       res.status(404).json({ error: 'Chapter metadata not found' });
+      return;
+    }
+    if (chapter.locked) {
+      res
+        .status(403)
+        .json({ error: 'Open this locked chapter on Webnovel.', code: 'CHAPTER_LOCKED' });
       return;
     }
     if (chapter.paragraphs) {
@@ -359,7 +406,7 @@ export function createApp(store: Store) {
     }
     const offset = z.coerce.number().int().min(0).default(0).parse(req.query.offset);
     const limit = z.coerce.number().int().min(1).max(50).default(20).parse(req.query.limit);
-    const all = store.chapters(req.params.id),
+    const all = store.chapters(req.params.id).filter((chapter) => !chapter.locked),
       slice = all.slice(offset, offset + limit);
     res.json({
       items: slice.filter((c) => c.downloaded).map((c) => store.chapter(c.id)),

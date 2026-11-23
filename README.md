@@ -27,15 +27,15 @@ Three original sample stories are included. Live catalogue records are stored in
 ## Reading and importing
 
 1. **Catalogue:** crawl source listing pages for novel names, covers, genres, and available metadata. Chapter bodies are not fetched during this crawl.
-2. **Open a novel:** import its chapter index—chapter numbers, titles, and source URLs. This is the default `index` mode. No chapter bodies are fetched.
-3. **Select a chapter:** the app requests a persistent single-chapter job, waits for it to finish, and displays the text. The backend caches the body for subsequent reads.
-4. **Download:** selected chapters are fetched as needed and saved to the phone's SQLite database (IndexedDB in the web preview). Downloads can be paused and resumed without downloading saved chapters again.
+2. **Chapter lists:** the backend backfills chapter numbers, titles, and links for existing and newly catalogued novels in the background. Opening a novel displays its saved list and shows indexing progress if the worker is still catching up. The refresh button retries a failed list or updates it for new releases.
+3. **Open or resume a novel:** the app queues the block of up to 100 chapters around the reading position. When you select an uncached chapter, the backend prioritizes it so you can read while the rest of the block finishes. Chapter bodies are cached by the backend.
+4. **Download:** save the next 100 chapters or choose a range. The app stores chapter lists and selected text in SQLite on mobile or IndexedDB on the web. Downloads can be paused and resumed.
 
 An explicit `all` import mode is also available through the API for fetching all available chapter bodies in the background. It is never the default when a novel is opened.
 
-Reader settings include font size, serif/sans fonts, line spacing, alignment, night/paper/sepia themes, background and text colours, bookmarks, and saved reading position. Open **Aa** inside a chapter to change preferences.
+The reader includes text search, private chapter notes, bookmarks, read-aloud, auto-scroll speeds, and an estimated reading time. Open **Display** for font size, line spacing, alignment, and themes. Library shelves support favorites, Want to read, Reading, Finished, and Archived. Search or sort the library, or jump straight back into a recent read.
 
-Discovery includes a **Top 10** shelf, Reddit discussion picks, genre filters, and search. Reader ratings support 1–5 stars, one updatable vote per device identity, and aggregate across duplicate source entries. Imported community scores remain separate from reader votes. The UI does not display scraper names, source URLs, or backend administration controls.
+Discover includes a **Top 10** shelf, a scrollable genre picker, and a catalogue list sortable by chapter count or title. Combine genre and search with **Completed**, **Reddit picks**, or **Webnovel**. The Reddit filter also shows links to recommendation threads. Reader ratings support 1–5 stars, one updatable vote per device identity, and aggregate across duplicate source entries.
 
 Reddit picks use **public RSS and verified discussion links**, with no Reddit Data API key or OAuth flow. Live RSS refresh is optional, paced, cached, and falls back to curated links when feeds are unavailable. Reddit mentions are discussion signals, never fabricated star ratings or upvote counts. See [community features](docs/community.md).
 
@@ -45,6 +45,7 @@ Reddit picks use **public RSS and verified discussion links**, with no Reddit Da
 | ------------------ | -------- | -------------------------------------------------------------------------------------------------------------- |
 | `freewebnovel-net` | Enabled  | FreeWebNovel.net; catalogue titles/covers, paginated chapter index, chapter text verified live                 |
 | `readnovelfull`    | Enabled  | ReadNovelFull; catalogue titles/covers, public complete archive endpoint, on-demand chapter text verified live |
+| `webnovel`         | Enabled  | Official Webnovel featured and genre lists, public chapter indexes, and direct book links                      |
 | `freewebnovel`     | Disabled | FreeWebNovel.com; returns Cloudflare challenge pages in this environment                                       |
 | `empirenovel`      | Disabled | EmpireNovel; returns Cloudflare challenge pages; adapter remains provisional                                   |
 
@@ -52,7 +53,9 @@ Reddit picks use **public RSS and verified discussion links**, with no Reddit Da
 
 Copy `apps/api/.env.example` to `apps/api/.env` to change enabled sources, request pacing, database path, or access token. Use sources and content you have permission to import and store. The transport checks robots.txt, restricts scrape requests and redirects to registered hosts, applies a per-source delay, limits response size, times out stalled requests, and retries transient failures. It identifies browser challenges and reports them without attempting to solve them.
 
-The first backend launch automatically indexes enabled sources when their catalogues are empty. Set `AUTO_INDEX_CATALOG=false` to disable this. Start refreshes and inspect crawls with the CLI while the API is running:
+The first backend launch automatically indexes enabled sources when their catalogues are empty. Set `AUTO_INDEX_CATALOG=false` to disable fresh catalogue crawls, or `AUTO_INDEX_CHAPTERS=false` to disable chapter list backfill. Background indexing is paced, so large catalogues can take time. In Discover, select **Webnovel** to browse its listed titles or paste a book link to add a specific title. Public chapters can be read in-app. Locked chapters open on Webnovel.
+
+Start refreshes and inspect crawls with the CLI while the API is running.
 
 ```sh
 npm run scrape -w @novelreader/api -- probe freewebnovel-net

@@ -84,7 +84,7 @@ export class RedditSync {
         if (!mentions.length) continue;
         this.store.db
           .prepare(
-            "INSERT INTO reddit_threads VALUES (?,?,?,?,NULL,'rss',?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,kind='rss',synced_at=excluded.synced_at,expires_at=excluded.expires_at",
+            "INSERT INTO reddit_threads VALUES (?,?,?,?,NULL,'rss',?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,synced_at=excluded.synced_at,expires_at=excluded.expires_at WHERE reddit_threads.kind='rss'",
           )
           .run(
             post.id,
@@ -94,7 +94,11 @@ export class RedditSync {
             Date.now(),
             Date.now() + 24 * 3600000,
           );
-        this.store.db.prepare('DELETE FROM reddit_mentions WHERE thread_id=?').run(post.id);
+        this.store.db
+          .prepare(
+            "DELETE FROM reddit_mentions WHERE thread_id=? AND EXISTS (SELECT 1 FROM reddit_threads WHERE id=? AND kind='rss')",
+          )
+          .run(post.id, post.id);
         for (const key of mentions)
           this.store.db
             .prepare('INSERT OR IGNORE INTO reddit_mentions VALUES (?,?)')
@@ -127,9 +131,10 @@ export class RedditSync {
     let total = 0;
     try {
       const subs = (
-        process.env.REDDIT_SUBREDDITS || 'noveltranslations,LightNovels,ProgressionFantasy'
+        process.env.REDDIT_SUBREDDITS || 'noveltranslations,LightNovels,ProgressionFantasy,Webnovel'
       )
         .split(',')
+        .map((s) => s.trim())
         .filter((s) => /^[A-Za-z0-9_]{2,40}$/.test(s))
         .slice(0, 5);
       for (const sub of subs) {

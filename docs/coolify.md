@@ -28,11 +28,11 @@ DATABASE_PATH=/data/novelreader.db
 TRUST_PROXY_HOPS=1
 API_TOKEN=REPLACE_WITH_A_RANDOM_TOKEN
 CORS_ORIGINS=https://novelsapi.brewwithcrew.com
-ENABLED_SOURCES=demo,freewebnovel-net,readnovelfull
+ENABLED_SOURCES=demo,freewebnovel-net,readnovelfull,webnovel
 SCRAPE_DELAY_MS=1500
 AUTO_INDEX_CATALOG=true
 REDDIT_RSS_ENABLED=true
-REDDIT_SUBREDDITS=noveltranslations,LightNovels,ProgressionFantasy
+REDDIT_SUBREDDITS=noveltranslations,LightNovels,ProgressionFantasy,Webnovel
 ```
 
 Generate a token locally with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Enter it in Coolify as a runtime secret, never in Git. Native mobile requests do not require a CORS origin; add the actual web-reader origin if hosting a web build later. `TRUST_PROXY_HOPS=1` assumes one direct Coolify proxy and no exposed container host port. Reassess it if adding another proxy such as Cloudflare.

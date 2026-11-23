@@ -54,6 +54,7 @@ export function setupCommunity(store: Store) {
   CREATE TABLE IF NOT EXISTS reader_ratings(novel_key TEXT NOT NULL,reader_id TEXT NOT NULL,value INTEGER NOT NULL CHECK(value BETWEEN 1 AND 5),updated_at INTEGER NOT NULL,PRIMARY KEY(novel_key,reader_id));
   CREATE TABLE IF NOT EXISTS reddit_threads(id TEXT PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL,subreddit TEXT NOT NULL,score INTEGER,kind TEXT NOT NULL,synced_at INTEGER NOT NULL,expires_at INTEGER);
   CREATE TABLE IF NOT EXISTS reddit_mentions(thread_id TEXT NOT NULL REFERENCES reddit_threads(id) ON DELETE CASCADE,novel_key TEXT NOT NULL,PRIMARY KEY(thread_id,novel_key));
+  CREATE INDEX IF NOT EXISTS reddit_mentions_by_novel ON reddit_mentions(novel_key);
   CREATE TABLE IF NOT EXISTS community_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS reading_events(novel_key TEXT NOT NULL,reader_id TEXT NOT NULL,day TEXT NOT NULL,action TEXT NOT NULL,PRIMARY KEY(novel_key,reader_id,day,action));
 `);
@@ -210,6 +211,17 @@ export class Community {
     const live = this.store.db
       .prepare("SELECT COUNT(*) AS n FROM reddit_threads WHERE kind='rss'")
       .get()!.n;
-    return { top10: top, reddit, forYou, redditMode: Number(live) > 0 ? 'rss' : 'curated' };
+    const redditThreads = this.store.db
+      .prepare(
+        "SELECT id,title,url,subreddit,score,kind FROM reddit_threads ORDER BY (kind='curated') DESC,synced_at DESC,id LIMIT 12",
+      )
+      .all() as unknown as RedditDiscussion[];
+    return {
+      top10: top,
+      reddit,
+      forYou,
+      redditMode: Number(live) > 0 ? 'rss' : 'curated',
+      redditThreads,
+    };
   }
 }

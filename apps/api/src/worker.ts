@@ -1,8 +1,11 @@
 import { Store } from './db.js';
 import { html, chapterIndex, parseBody, SourceError } from './sources.js';
 import type { ImportJob } from '@novelreader/shared';
+import { enabled, sourceIds } from './source-registry.js';
 export class Worker {
   private busy = new Set<'novel' | 'chapter'>();
+  private nextIndexScan = 0;
+  private nextSource = 0;
   constructor(private store: Store) {
     store.db.prepare("UPDATE jobs SET status='queued' WHERE status='running'").run();
   }
@@ -10,11 +13,28 @@ export class Worker {
     await Promise.all(
       (['chapter', 'novel'] as const).map(async (lane) => {
         if (this.busy.has(lane)) return;
-        const row = this.store.db
+        let row = this.store.db
           .prepare(
-            `SELECT id FROM jobs WHERE status='queued' AND chapter_id IS ${lane === 'chapter' ? 'NOT ' : ''}NULL ORDER BY created_at LIMIT 1`,
+            `SELECT id FROM jobs WHERE status='queued' AND chapter_id IS ${lane === 'chapter' ? 'NOT ' : ''}NULL ORDER BY priority DESC,created_at,rowid LIMIT 1`,
           )
           .get();
+        if (
+          !row &&
+          lane === 'novel' &&
+          process.env.AUTO_INDEX_CHAPTERS !== 'false' &&
+          Date.now() >= this.nextIndexScan
+        ) {
+          for (let attempt = 0; attempt < sourceIds.length; attempt++) {
+            const source = sourceIds[this.nextSource];
+            this.nextSource = (this.nextSource + 1) % sourceIds.length;
+            if (!enabled(source)) continue;
+            const novel = this.store.nextUnindexedNovel(source);
+            if (!novel) continue;
+            row = { id: this.store.enqueue(novel).id };
+            break;
+          }
+          if (!row) this.nextIndexScan = Date.now() + 5000;
+        }
         if (!row) return;
         this.busy.add(lane);
         try {
@@ -32,9 +52,15 @@ export class Worker {
     const chapter = this.store.chapter(chapterId),
       novel = this.store.novel(job.novelId)!;
     if (!chapter) throw new SourceError('Chapter metadata was not found', 'CHAPTER_NOT_FOUND');
-    if (chapter.paragraphs) return;
-    const paragraphs = parseBody(await html(novel.source, chapter.url));
-    this.store.saveBody(chapterId, paragraphs);
+    if (chapter.paragraphs || chapter.locked) return;
+    try {
+      const paragraphs = parseBody(await html(novel.source, chapter.url), novel.source);
+      this.store.saveBody(chapterId, paragraphs);
+    } catch (error) {
+      if (error instanceof SourceError && error.code === 'CHAPTER_LOCKED')
+        this.store.saveChapter({ ...chapter, locked: true });
+      throw error;
+    }
     this.store.clearFailure(chapterId);
   }
   private async run(id: string) {
@@ -83,9 +109,10 @@ export class Worker {
         for (const c of parsed.chapters) this.store.saveChapter(c);
       }
       if (this.cancelled(id)) return;
-      const chapters = this.store.chapters(novel.id);
+      const all = this.store.job(id)?.mode === 'all';
+      const chapters = this.store.chapters(novel.id).filter((c) => !all || !c.locked);
       total = chapters.length;
-      if (this.store.job(id)?.mode !== 'all') {
+      if (!all) {
         this.store.updateJob(id, 'completed', total, total);
         return;
       }

@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import type { Chapter } from '@novelreader/shared';
+import { chapterBatchSize } from '@novelreader/shared';
 import { palette, s } from '../theme';
 
 function ChapterSheet({
@@ -127,6 +128,12 @@ export function DownloadRange({
           </View>
         </View>
         <View style={[s.row, styles.filters]}>
+          <Choice
+            label="Next 100"
+            onPress={() =>
+              selectRange(first, Math.min(chapters.length, first + chapterBatchSize - 1))
+            }
+          />
           <Choice
             label="Next 10"
             onPress={() => selectRange(first, Math.min(chapters.length, first + 9))}

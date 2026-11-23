@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { ChapterContent, NovelDetail } from '@novelreader/shared';
-import { getChapter, putChapter } from './chapter-cache';
+import { getChapter, getNovelDetail, putChapter, putNovelDetail } from './chapter-cache';
 export async function read<T>(key: string, fallback: T): Promise<T> {
   const raw = await AsyncStorage.getItem(key);
   return raw ? JSON.parse(raw) : fallback;
@@ -13,7 +13,13 @@ export async function saveChapter(chapter: ChapterContent) {
   await putChapter(chapter);
 }
 export async function saveDetail(detail: NovelDetail) {
-  await write(`novel:${detail.novel.id}`, detail);
+  await putNovelDetail(detail);
+}
+export async function readDetail(id: string): Promise<NovelDetail | null> {
+  return (
+    (await getNovelDetail(id).catch(() => null)) ??
+    (await read<NovelDetail | null>(`novel:${id}`, null).catch(() => null))
+  );
 }
 export interface ReaderSettings {
   size: number;

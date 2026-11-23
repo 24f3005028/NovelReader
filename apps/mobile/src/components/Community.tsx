@@ -54,16 +54,26 @@ export function RatingPanel({
     </View>
   );
 }
-export function DiscussionPanel({ threads }: { threads: RedditDiscussion[] }) {
+export function DiscussionPanel({
+  threads,
+  title = 'Readers are talking',
+}: {
+  threads: RedditDiscussion[];
+  title?: string;
+}) {
   if (!threads.length) return null;
   return (
     <View style={s.panel}>
       <View style={s.row}>
         <Ionicons name="logo-reddit" size={20} color="#329eff" />
-        <Text style={s.heading}>Readers are talking</Text>
+        <Text style={s.heading}>{title}</Text>
       </View>
       {threads.slice(0, 4).map((thread) => (
-        <Pressable key={thread.id} onPress={() => void Linking.openURL(thread.url)}>
+        <Pressable
+          key={thread.id}
+          accessibilityRole="link"
+          onPress={() => void Linking.openURL(thread.url)}
+        >
           <Text style={s.link}>{thread.title} ↗</Text>
           <Text style={s.small}>r/{thread.subreddit}</Text>
         </Pressable>
@@ -75,10 +85,12 @@ export function DiscoveryShelves({
   feed,
   onOpen,
   renderCover,
+  personalized,
 }: {
   feed: DiscoveryFeed;
   onOpen: (n: Novel) => void;
   renderCover: (n: Novel) => React.ReactNode;
+  personalized: boolean;
 }) {
   const shelf = (
     items: Novel[],
@@ -91,11 +103,6 @@ export function DiscoveryShelves({
         <Text style={s.heading}>{title}</Text>
         <Ionicons name={icon} size={20} color="#329eff" />
       </View>
-      {icon === 'logo-reddit' && (
-        <Text style={[s.muted, { marginTop: -8, marginBottom: 14 }]}>
-          Discover what readers are discussing.
-        </Text>
-      )}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
         <View style={[s.row, { flexWrap: 'nowrap', alignItems: 'flex-start', gap: 14 }]}>
           {items.map((n, i) => (
@@ -134,7 +141,8 @@ export function DiscoveryShelves({
   return (
     <>
       {feed.top10.length > 0 && shelf(feed.top10, 'The popular 10', 'trending-up', true)}
-      {feed.reddit.length > 0 && shelf(feed.reddit, 'From Reddit', 'logo-reddit')}
+      {feed.reddit.length > 0 && shelf(feed.reddit, 'Reddit recommendations', 'logo-reddit')}
+      {personalized && feed.forYou.length > 0 && shelf(feed.forYou, 'Picked for you', 'sparkles')}
     </>
   );
 }

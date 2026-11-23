@@ -402,6 +402,136 @@ test('catalogue groups duplicate titles across sources and keeps the cached copy
   assert.equal(cached.body.items[0].ratingCount, 0);
   assert.equal(normalizeNovelTitle('Lord of the Mysteries'), 'lord of mysteries');
 });
+test('completed, genre, and Reddit filters work with whole-catalogue chapter sorting', async () => {
+  const base = {
+    ...store.novels()[0],
+    source: 'freewebnovel-net' as const,
+    url: 'https://freewebnovel.net/fixture.html',
+    genres: ['Fantasy'],
+  };
+  store.saveNovel({ ...base, id: 'long', title: 'Lord of Mysteries', chapterCount: 12 });
+  store.saveNovel({
+    ...base,
+    id: 'long-alias',
+    source: 'webnovel',
+    title: 'Lord of the Mysteries',
+    status: 'completed',
+    reportedChapterCount: 1432,
+  });
+  for (let i = 0; i < 31; i++)
+    store.saveNovel({
+      ...base,
+      id: `short-${i}`,
+      title: `Short novel ${i}`,
+      genres: ['fantasy'],
+      chapterCount: i + 1,
+      status: 'completed',
+    });
+  const app = createApp(store);
+  const path = '/novels?genre=fantasy&completed=true&sort=chapters';
+  const first = await request(app).get(path).expect(200);
+  assert.equal(first.body.items[0].id, 'long');
+  assert.equal(first.body.items[0].reportedChapterCount, 1432);
+  assert.equal(first.body.items[1].chapterCount, 31);
+  assert.equal(first.body.hasMore, true);
+  const second = await request(app).get(`${path}&page=2`).expect(200);
+  assert.ok(second.body.items.every((n: { id: string }) => n.id !== 'long'));
+  const reddit = await request(app).get(`${path}&reddit=true`).expect(200);
+  assert.deepEqual(
+    reddit.body.items.map((n: { id: string }) => n.id),
+    ['long'],
+  );
+  const genres = await request(app).get('/genres').expect(200);
+  assert.equal(genres.body.filter((g: string) => g.toLowerCase() === 'fantasy').length, 1);
+});
+test('the background worker indexes Webnovel chapters before opening a book and protects locked chapters', async () => {
+  const original = globalThis.fetch;
+  const previous = process.env.ENABLED_SOURCES;
+  process.env.ENABLED_SOURCES = 'webnovel';
+  const card =
+    '<li><h3><a href="/book/example_123">Example</a></h3><strong><span>4.9</span></strong><strong><span>2 Chapters</span></strong></li>';
+  const [book] = parseCatalog('webnovel', card, 'https://www.webnovel.com/stories/novel');
+  assert.equal(book.chapterCount, 2);
+  store.saveNovel(book);
+  const fetched: string[] = [];
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    fetched.push(path);
+    const archive = `<div class="det-info"><h1>Example</h1>
+      <strong><svg title="Status"></svg><span>Completed</span></strong>
+      <strong><svg title="Chapters"></svg><span>2 Chapters</span></strong></div>
+      <ul class="volume-item">
+        <li data-cid="111"><a href="/book/example_123/first_111" title="First"><i class="_num">1</i></a></li>
+        <li data-cid="112"><a href="/book/example_123/second_112" title="Second"><i class="_num">2</i><svg><use xlink:href="#i-lock"></use></svg></a></li>
+      </ul>`;
+    return new Response(path === '/robots.txt' ? 'User-agent: *\nDisallow:' : archive, {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  try {
+    const app = createApp(store);
+    assert.equal(store.latestJob(book.id), null);
+    await new Worker(store).tick();
+    assert.deepEqual(fetched, ['/robots.txt', '/book/123/catalog']);
+    const detail = await request(app).get(`/novels/${book.id}`).expect(200);
+    assert.equal(detail.body.job.status, 'completed');
+    assert.equal(detail.body.novel.status, 'completed');
+    const [first, second] = detail.body.chapters;
+    assert.equal(first.downloaded, false);
+    assert.equal(second.locked, true);
+    await request(app).post(`/chapters/${second.id}/import`).expect(403);
+    const imported = await request(app)
+      .post('/imports')
+      .send({
+        url: 'https://www.webnovel.com/book/123?from=share',
+      })
+      .expect(202);
+    assert.equal(imported.body.novel.id, book.id);
+    assert.equal(imported.body.job.id, detail.body.job.id);
+  } finally {
+    globalThis.fetch = original;
+    process.env.ENABLED_SOURCES = previous;
+  }
+});
+test('opening a chapter batch queues its 100-position block once and puts the selected chapter first', async () => {
+  const novel = store.novels()[0];
+  for (let ordinal = 4; ordinal <= 220; ordinal++) {
+    store.saveChapter({
+      id: `fixture-${ordinal}`,
+      novelId: novel.id,
+      ordinal,
+      title: `Chapter ${ordinal}`,
+      url: `demo://chapters/${ordinal}`,
+      downloaded: false,
+      locked: ordinal === 105,
+    });
+  }
+  store.saveBody('fixture-101', ['Already cached']);
+  const app = createApp(store);
+  const endpoint = `/novels/${novel.id}/chapter-batches`;
+  const first = await request(app).post(endpoint).send({ chapterId: 'fixture-107' }).expect(202);
+  const repeat = await request(app).post(endpoint).send({ chapterId: 'fixture-107' }).expect(202);
+  assert.equal(first.body.job.id, repeat.body.job.id);
+  const promoted = await request(app)
+    .post(endpoint)
+    .send({ chapterId: 'fixture-109', prioritize: true })
+    .expect(202);
+  const jobs = store.db
+    .prepare('SELECT id, chapter_id FROM jobs ORDER BY priority DESC, created_at, rowid')
+    .all();
+  assert.equal(jobs.length, 98);
+  assert.equal(jobs[0].id, promoted.body.job.id);
+  assert.deepEqual(
+    new Set(jobs.map((job) => job.chapter_id)),
+    new Set(
+      Array.from({ length: 99 }, (_, i) => i + 102)
+        .filter((i) => i !== 105)
+        .map((i) => `fixture-${i}`),
+    ),
+  );
+  await request(app).post(endpoint).send({ chapterId: 'fixture-105' }).expect(403);
+  await request(app).post(endpoint).send({ chapterId: 'absent' }).expect(404);
+});
 test('ratings update one vote per reader and aggregate across duplicate source entries', async () => {
   const n = store.novels()[0];
   const alias = {

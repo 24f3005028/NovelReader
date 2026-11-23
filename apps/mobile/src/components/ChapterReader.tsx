@@ -1,4 +1,7 @@
 import {
+  useEffect,
+  useEffectEvent,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
@@ -7,16 +10,20 @@ import {
   type RefObject,
 } from 'react';
 import {
+  AppState,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type GestureResponderEvent,
   type TextStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import * as Speech from 'expo-speech';
 import { Ionicons } from '@expo/vector-icons';
 import type { ChapterContent } from '@novelreader/shared';
 import type { ReaderSettings } from '../storage';
@@ -67,6 +74,8 @@ export function ChapterReader({
   bookmarked,
   saved,
   downloadDisabled,
+  note,
+  onSaveNote,
   onControls,
   onBack,
   onContents,
@@ -92,6 +101,8 @@ export function ChapterReader({
   bookmarked: boolean;
   saved: boolean;
   downloadDisabled: boolean;
+  note: string;
+  onSaveNote: (text: string) => void;
   onControls: (show: boolean) => void;
   onBack: () => void;
   onContents: () => void;
@@ -115,6 +126,110 @@ export function ChapterReader({
   const extent = useRef({ content: 0, viewport: 0 });
   const trackWidth = useRef(0);
   const [scrubbing, setScrubbing] = useState<number | null>(null);
+  const [finding, setFinding] = useState(false);
+  const [query, setQuery] = useState('');
+  const [match, setMatch] = useState(0);
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [scrollSpeed, setScrollSpeed] = useState(0);
+  const [speaking, setSpeaking] = useState(false);
+  const [speechError, setSpeechError] = useState('');
+  const speechRun = useRef(0);
+  const paragraphs = useRef<number[]>([]);
+  const words = useMemo(
+    () =>
+      chapter.paragraphs.reduce(
+        (total, paragraph) => total + paragraph.trim().split(/\s+/).length,
+        0,
+      ),
+    [chapter.paragraphs],
+  );
+  const minutes = Math.ceil((words / 220) * Math.max(0, 1 - percent / 100));
+  const search = query.trim().toLowerCase();
+  const matches = useMemo(
+    () =>
+      search
+        ? chapter.paragraphs.flatMap((paragraph, index) =>
+            paragraph.toLowerCase().includes(search) ? [index] : [],
+          )
+        : [],
+    [chapter.paragraphs, search],
+  );
+  const activeMatch = matches[match];
+
+  const stopSpeech = useEffectEvent(() => {
+    speechRun.current++;
+    void Speech.stop().catch(() => {});
+  });
+  useEffect(() => () => stopSpeech(), []);
+  const autoScroll = useEffectEvent(() => {
+    if (AppState.currentState !== 'active' || !scroll.current) return;
+    const end = extent.current.content - extent.current.viewport;
+    if (end <= 0 || offsetRef.current >= end - 1) {
+      setScrollSpeed(0);
+      onSavePosition();
+      return;
+    }
+    const y = Math.min(end, offsetRef.current + scrollSpeed * 4);
+    scroll.current.scrollTo({ y, animated: false });
+    onProgress(Math.round((100 * y) / end), y);
+  });
+  useEffect(() => {
+    if (!scrollSpeed || loading || editingNote || finding) return;
+    const timer = setInterval(autoScroll, 100);
+    return () => clearInterval(timer);
+  }, [scrollSpeed, loading, editingNote, finding]);
+
+  function jumpToMatch(index: number) {
+    const y = paragraphs.current[index];
+    if (y !== undefined) scroll.current?.scrollTo({ y: Math.max(0, y - 18), animated: true });
+  }
+  function moveMatch(delta: number) {
+    if (!matches.length) return;
+    const next = (match + delta + matches.length) % matches.length;
+    setMatch(next);
+    jumpToMatch(matches[next]);
+  }
+  function toggleSpeech() {
+    const id = ++speechRun.current;
+    setSpeechError('');
+    if (speaking) {
+      setSpeaking(false);
+      void Speech.stop().catch(() => {});
+      return;
+    }
+    const first = Math.max(
+      0,
+      paragraphs.current.findLastIndex((y) => y <= offsetRef.current),
+    );
+    const limit = Math.min(180, Speech.maxSpeechInputLength) || 180;
+    const chunks = chapter.paragraphs
+      .slice(first)
+      .flatMap(
+        (text) =>
+          text.match(new RegExp(`[\\s\\S]{1,${limit}}(?:\\s|$)|[\\s\\S]{1,${limit}}`, 'gu')) || [],
+      );
+    function speak(index: number) {
+      if (speechRun.current !== id) return;
+      const value = chunks[index];
+      if (!value) {
+        setSpeaking(false);
+        return;
+      }
+      const failed = () => {
+        if (speechRun.current !== id) return;
+        setSpeaking(false);
+        setSpeechError('Read aloud is unavailable on this device.');
+      };
+      try {
+        Speech.speak(value, { onDone: () => speak(index + 1), onError: failed });
+      } catch {
+        failed();
+      }
+    }
+    setSpeaking(true);
+    speak(0);
+  }
 
   function beginTap(event: GestureResponderEvent) {
     const { touches, pageX, pageY } = event.nativeEvent;
@@ -169,6 +284,52 @@ export function ChapterReader({
           onPress={() => onNext?.()}
         />
       </View>
+      {finding && (
+        <View style={[styles.findBar, border]}>
+          <TextInput
+            style={[styles.findInput, { color: text }]}
+            value={query}
+            onChangeText={(value) => {
+              setQuery(value);
+              setMatch(0);
+            }}
+            autoFocus
+            accessibilityLabel="Find in chapter"
+            placeholder="Find in chapter"
+            placeholderTextColor={text}
+            returnKeyType="search"
+            onSubmitEditing={() => matches.length && jumpToMatch(matches[match])}
+          />
+          {search && (
+            <Text style={{ color: text }}>
+              {matches.length ? `${match + 1}/${matches.length}` : '0 matches'}
+            </Text>
+          )}
+          <ReaderAction
+            icon="chevron-up"
+            label="Previous match"
+            color={text}
+            disabled={!matches.length}
+            onPress={() => moveMatch(-1)}
+          />
+          <ReaderAction
+            icon="chevron-down"
+            label="Next match"
+            color={text}
+            disabled={!matches.length}
+            onPress={() => moveMatch(1)}
+          />
+          <ReaderAction
+            icon="close"
+            label="Close chapter search"
+            color={text}
+            onPress={() => {
+              setFinding(false);
+              setQuery('');
+            }}
+          />
+        </View>
+      )}
       <View style={styles.viewport}>
         <ScrollView
           key={chapter.id}
@@ -197,6 +358,7 @@ export function ChapterReader({
           }}
           scrollEventThrottle={100}
           onScrollEndDrag={onSavePosition}
+          onScrollBeginDrag={() => setScrollSpeed(0)}
           onMomentumScrollEnd={onSavePosition}
         >
           <Text
@@ -213,7 +375,18 @@ export function ChapterReader({
             {chapter.title}
           </Text>
           {chapter.paragraphs.map((paragraph, index) => (
-            <Text selectable key={index} style={[textStyle, { marginBottom: settings.size }]}>
+            <Text
+              selectable
+              key={index}
+              onLayout={(event) => {
+                paragraphs.current[index] = event.nativeEvent.layout.y;
+              }}
+              style={[
+                textStyle,
+                { marginBottom: settings.size },
+                activeMatch === index && { backgroundColor: `${accent}2e` },
+              ]}
+            >
               {paragraph}
             </Text>
           ))}
@@ -359,11 +532,51 @@ export function ChapterReader({
                   onPress={onTheme}
                 />
               </View>
+              <View style={styles.dockActions}>
+                <ReaderAction
+                  icon="search-outline"
+                  label="Find in chapter"
+                  caption="Find"
+                  color={text}
+                  onPress={() => {
+                    onControls(false);
+                    setFinding(true);
+                  }}
+                />
+                <ReaderAction
+                  icon="document-text-outline"
+                  label="Edit chapter note"
+                  caption="Note"
+                  color={note ? accent : text}
+                  onPress={() => {
+                    setNoteDraft(note);
+                    setEditingNote(true);
+                  }}
+                />
+                <ReaderAction
+                  icon={speaking ? 'stop-circle-outline' : 'volume-high-outline'}
+                  label={speaking ? 'Stop read aloud' : 'Read aloud'}
+                  caption={speaking ? 'Stop audio' : 'Read aloud'}
+                  color={speaking ? accent : text}
+                  onPress={toggleSpeech}
+                />
+                <ReaderAction
+                  icon={scrollSpeed ? 'pause-outline' : 'play-outline'}
+                  label="Change auto-scroll speed"
+                  caption={['Scroll', 'Slow', 'Medium', 'Fast'][scrollSpeed]}
+                  color={scrollSpeed ? accent : text}
+                  onPress={() => {
+                    setScrollSpeed((scrollSpeed + 1) % 4);
+                    onSavePosition();
+                  }}
+                />
+              </View>
             </View>
           </View>
         )}
       </View>
       {feedback}
+      {!!speechError && <Text style={[styles.endLabel, { color: text }]}>{speechError}</Text>}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={controls ? 'Hide reading controls' : 'Show reading controls'}
@@ -375,10 +588,46 @@ export function ChapterReader({
         </Text>
         <Ionicons name={controls ? 'chevron-down' : 'ellipsis-horizontal'} size={18} color={text} />
         <Text style={[styles.footerText, { color: text, textAlign: 'right' }]}>
-          {Math.round(scrubbing ?? percent)}%
+          {Math.round(scrubbing ?? percent)}%{minutes > 0 ? ` · ${minutes} min` : ''}
         </Text>
       </Pressable>
       {children}
+      {editingNote && (
+        <Modal animationType="slide" onRequestClose={() => setEditingNote(false)}>
+          <SafeAreaView style={[styles.noteSheet, { backgroundColor: background }]}>
+            <View style={styles.findBar}>
+              <Text style={[styles.toolTitle, { color: text }]}>Chapter note</Text>
+              <ReaderAction
+                icon="checkmark"
+                label="Save note"
+                color={accent}
+                onPress={() => {
+                  onSaveNote(noteDraft);
+                  setEditingNote(false);
+                }}
+              />
+              <ReaderAction
+                icon="close"
+                label="Cancel note edit"
+                color={text}
+                onPress={() => setEditingNote(false)}
+              />
+            </View>
+            <TextInput
+              autoFocus
+              multiline
+              textAlignVertical="top"
+              accessibilityLabel="Private chapter note"
+              placeholder="Write a private note…"
+              placeholderTextColor={text}
+              style={[styles.noteInput, { color: text, borderColor: `${text}24` }]}
+              maxLength={4000}
+              value={noteDraft}
+              onChangeText={setNoteDraft}
+            />
+          </SafeAreaView>
+        </Modal>
+      )}
     </SafeAreaView>
   );
 }
@@ -449,4 +698,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   footerText: { fontSize: 11, opacity: 0.62, minWidth: 68 },
+  findBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  findInput: { flex: 1, minWidth: 64, paddingVertical: 10 },
+  noteSheet: { flex: 1, paddingHorizontal: 18 },
+  noteInput: { minHeight: 180, padding: 15, marginTop: 18, borderRadius: 12, borderWidth: 1 },
 });

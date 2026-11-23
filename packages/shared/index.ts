@@ -1,6 +1,11 @@
 export type SourceId =
-  'demo' | 'freewebnovel' | 'empirenovel' | 'freewebnovel-net' | 'readnovelfull';
+  'demo' | 'freewebnovel' | 'empirenovel' | 'freewebnovel-net' | 'readnovelfull' | 'webnovel';
+export type NovelStatus = 'completed' | 'ongoing';
+export const chapterBatchSize = 100;
+export const catalogSorts = ['default', 'chapters', 'title'] as const;
+export type CatalogSort = (typeof catalogSorts)[number];
 export interface Novel {
+  status?: NovelStatus;
   catalogKey?: string;
   popularityRank?: number;
   communityRating?: number;
@@ -20,6 +25,7 @@ export interface Novel {
   chapterCount: number;
 }
 export interface Chapter {
+  locked?: boolean;
   // Ordinal is reading order; source chapter numbering stays in title.
   id: string;
   novelId: string;
@@ -82,6 +88,7 @@ export interface NovelDetail {
   novel: Novel;
   chapters: Chapter[];
   job: ImportJob | null;
+  chapterIndexPending?: boolean;
 }
 export interface RatingSummary {
   average: number | null;
@@ -101,4 +108,5 @@ export interface DiscoveryFeed {
   reddit: Novel[];
   forYou: Novel[];
   redditMode: 'curated' | 'rss';
+  redditThreads?: RedditDiscussion[];
 }
